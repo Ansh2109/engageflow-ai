@@ -189,12 +189,15 @@ export default function LandingPage() {
             <Zap className="h-4 w-4 text-primary" />
             EngageFlow AI
           </div>
-          <div className="flex gap-6">
+          <div className="flex flex-wrap justify-center gap-6">
             <Link href="/privacy" className="hover:text-foreground transition-colors">
               Privacy
             </Link>
             <Link href="/terms" className="hover:text-foreground transition-colors">
               Terms
+            </Link>
+            <Link href="/data-deletion" className="hover:text-foreground transition-colors">
+              Data deletion
             </Link>
           </div>
           <p>© 2026 EngageFlow AI. All rights reserved.</p>
