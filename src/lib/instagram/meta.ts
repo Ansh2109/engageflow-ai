@@ -144,13 +144,32 @@ export async function exchangeMetaCode(
     throw new MetaApiError("meta_invalid_response");
   }
 
-  if (
-    !response.ok ||
-    typeof payload.access_token !== "string" ||
-    payload.access_token.length === 0
-  ) {
-    throw new MetaApiError("meta_token_exchange_failed");
-  }
+  
+if (
+  !response.ok ||
+  typeof payload.access_token !== "string" ||
+  payload.access_token.length === 0
+) {
+  const metaError = (
+    payload as {
+      error?: {
+        type?: string;
+        code?: number;
+        error_subcode?: number;
+      };
+    }
+  ).error;
+
+  console.error("[Instagram] Meta token exchange rejected.", {
+    httpStatus: response.status,
+    errorType: metaError?.type ?? "unknown",
+    errorCode: metaError?.code ?? null,
+    errorSubcode: metaError?.error_subcode ?? null,
+  });
+
+  throw new MetaApiError("meta_token_exchange_failed");
+}
+
 
   if (payload.expires_in === undefined) {
     return { accessToken: payload.access_token, expiresAt: null };
