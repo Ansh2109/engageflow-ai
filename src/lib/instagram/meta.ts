@@ -126,6 +126,7 @@ export async function exchangeMetaCode(
   url.searchParams.set("client_id", config.appId);
   url.searchParams.set("client_secret", config.appSecret);
   url.searchParams.set("code", code);
+  url.searchParams.set("redirect_uri", config.redirectUri);
 
   let response: Response;
   try {
