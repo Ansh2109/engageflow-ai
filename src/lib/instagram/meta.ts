@@ -32,6 +32,28 @@ export type MetaInstagramAccount = {
   profilePictureUrl: string | null;
 };
 
+export type MetaInstagramProfile = {
+  id: string;
+  username: string;
+  name: string | null;
+  profilePictureUrl: string | null;
+};
+
+export type MetaInstagramMedia = {
+  id: string;
+  caption: string | null;
+  mediaType: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM";
+  mediaUrl: string | null;
+  permalink: string | null;
+  thumbnailUrl: string | null;
+  timestamp: string;
+};
+
+export type MetaInstagramMediaPage = {
+  media: MetaInstagramMedia[];
+  nextCursor: string | null;
+};
+
 export type ExchangedMetaToken = {
   accessToken: string;
   expiresAt: string | null;
@@ -165,6 +187,117 @@ async function requestJson(
   }
 
   return payload;
+}
+
+export async function getInstagramProfile(
+  config: MetaConfig,
+  accessToken: string,
+  instagramUserId: string
+): Promise<MetaInstagramProfile> {
+  if (!isValidMetaId(instagramUserId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+
+  const payload = asRecord(
+    await requestJson(config, instagramUserId, accessToken, {
+      params: { fields: "id,username,name,profile_picture_url" },
+    })
+  );
+  if (
+    !payload ||
+    payload.id !== instagramUserId ||
+    typeof payload.username !== "string" ||
+    payload.username.trim().length === 0
+  ) {
+    throw new MetaApiError("meta_profile_invalid_response");
+  }
+
+  return {
+    id: instagramUserId,
+    username: payload.username,
+    name: typeof payload.name === "string" ? payload.name : null,
+    profilePictureUrl:
+      typeof payload.profile_picture_url === "string"
+        ? payload.profile_picture_url
+        : null,
+  };
+}
+
+const INSTAGRAM_MEDIA_PAGE_SIZE = 12;
+
+export async function getInstagramMedia(
+  config: MetaConfig,
+  accessToken: string,
+  instagramUserId: string,
+  after?: string
+): Promise<MetaInstagramMediaPage> {
+  if (!isValidMetaId(instagramUserId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+  if (
+    after !== undefined &&
+    (after.length === 0 || after.length > 512 || /[\u0000-\u001f]/.test(after))
+  ) {
+    throw new MetaApiError("meta_pagination_invalid");
+  }
+
+  const payload = asRecord(
+    await requestJson(config, `${instagramUserId}/media`, accessToken, {
+      params: {
+        fields:
+          "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp",
+        limit: String(INSTAGRAM_MEDIA_PAGE_SIZE),
+        ...(after ? { after } : {}),
+      },
+    })
+  );
+  if (!payload || !Array.isArray(payload.data)) {
+    throw new MetaApiError("meta_media_invalid_response");
+  }
+
+  const media: MetaInstagramMedia[] = [];
+  for (const value of payload.data) {
+    const item = asRecord(value);
+    if (
+      !item ||
+      !isValidMetaId(item.id) ||
+      (item.media_type !== "IMAGE" &&
+        item.media_type !== "VIDEO" &&
+        item.media_type !== "CAROUSEL_ALBUM") ||
+      typeof item.timestamp !== "string"
+    ) {
+      throw new MetaApiError("meta_media_invalid_response");
+    }
+
+    media.push({
+      id: item.id,
+      caption: typeof item.caption === "string" ? item.caption : null,
+      mediaType: item.media_type,
+      mediaUrl: typeof item.media_url === "string" ? item.media_url : null,
+      permalink: typeof item.permalink === "string" ? item.permalink : null,
+      thumbnailUrl:
+        typeof item.thumbnail_url === "string" ? item.thumbnail_url : null,
+      timestamp: item.timestamp,
+    });
+  }
+
+  const paging = asRecord(payload.paging);
+  const cursors = asRecord(paging?.cursors);
+  const hasNextPage = typeof paging?.next === "string" && paging.next !== "";
+  const nextCursor = hasNextPage ? cursors?.after : null;
+  if (
+    hasNextPage &&
+    (typeof nextCursor !== "string" ||
+      nextCursor.length === 0 ||
+      nextCursor.length > 512)
+  ) {
+    throw new MetaApiError("meta_pagination_invalid");
+  }
+
+  return {
+    media,
+    nextCursor: typeof nextCursor === "string" ? nextCursor : null,
+  };
 }
 
 function tokenExpiry(expiresAt: unknown): string | null {

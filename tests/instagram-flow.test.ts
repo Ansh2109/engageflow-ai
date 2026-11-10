@@ -21,6 +21,8 @@ import {
 } from "../src/lib/instagram/flow.ts";
 import {
   exchangeMetaCode,
+  getInstagramMedia,
+  getInstagramProfile,
   getMetaConfig,
   MetaApiError,
   refreshInstagramLongLivedToken,
@@ -29,6 +31,10 @@ import {
   logInstagramPersistenceError,
   sanitizeDatabaseErrorMessage,
 } from "../src/lib/instagram/diagnostics.ts";
+import {
+  deduplicateInstagramMedia,
+  isValidInstagramTimestamp,
+} from "../src/app/(dashboard)/instagram/instagram-account-data-utils.ts";
 
 test("OAuth URL invokes the configured Facebook Login for Business flow", () => {
   const url = buildMetaAuthorizationUrl(
@@ -616,6 +622,252 @@ test("code exchange validates the System User token, scopes, identity, and assig
   }
 });
 
+test("Instagram profile reads the requested account through the configured Graph API", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    requests.push(url);
+    return Response.json({
+      id: "17841400000000002",
+      username: "connected_creator",
+      name: "Creator",
+      profile_picture_url: "https://cdn.example/profile.jpg",
+    });
+  };
+
+  try {
+    const profile = await getInstagramProfile(
+      {
+        appId: "1234567890",
+        appSecret: "test-app-secret",
+        configId: "9876543210",
+        apiVersion: "v27.0",
+        redirectUri: "https://engage.example/api/instagram/callback",
+      },
+      "server-only-system-user-token",
+      "17841400000000002"
+    );
+
+    assert.deepEqual(profile, {
+      id: "17841400000000002",
+      username: "connected_creator",
+      name: "Creator",
+      profilePictureUrl: "https://cdn.example/profile.jpg",
+    });
+    assert.equal(requests[0].origin, "https://graph.facebook.com");
+    assert.equal(
+      requests[0].pathname,
+      "/v27.0/17841400000000002"
+    );
+    assert.equal(
+      requests[0].searchParams.get("fields"),
+      "id,username,name,profile_picture_url"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram media supports empty results, Reels, and cursor pagination", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    requests.push(url);
+    if (!url.searchParams.has("after")) {
+      return Response.json({
+        data: [
+          {
+            id: "18000000000000001",
+            caption: "Recent Reel",
+            media_type: "VIDEO",
+            media_url: null,
+            thumbnail_url: "https://cdn.example/reel-cover.jpg",
+            permalink: "https://www.instagram.com/reel/example/",
+            timestamp: "2026-11-10T12:00:00+0000",
+          },
+        ],
+        paging: {
+          cursors: { after: "opaque-next-cursor" },
+          next: "https://graph.facebook.com/v27.0/17841400000000002/media?after=opaque-next-cursor",
+        },
+      });
+    }
+    return Response.json({ data: [], paging: {} });
+  };
+
+  try {
+    const firstPage = await getInstagramMedia(
+      {
+        appId: "1234567890",
+        appSecret: "test-app-secret",
+        configId: "9876543210",
+        apiVersion: "v27.0",
+        redirectUri: "https://engage.example/api/instagram/callback",
+      },
+      "server-only-system-user-token",
+      "17841400000000002"
+    );
+    assert.equal(firstPage.nextCursor, "opaque-next-cursor");
+    assert.deepEqual(firstPage.media[0], {
+      id: "18000000000000001",
+      caption: "Recent Reel",
+      mediaType: "VIDEO",
+      mediaUrl: null,
+      permalink: "https://www.instagram.com/reel/example/",
+      thumbnailUrl: "https://cdn.example/reel-cover.jpg",
+      timestamp: "2026-11-10T12:00:00+0000",
+    });
+
+    const nextPage = await getInstagramMedia(
+      {
+        appId: "1234567890",
+        appSecret: "test-app-secret",
+        configId: "9876543210",
+        apiVersion: "v27.0",
+        redirectUri: "https://engage.example/api/instagram/callback",
+      },
+      "server-only-system-user-token",
+      "17841400000000002",
+      firstPage.nextCursor ?? undefined
+    );
+    assert.deepEqual(nextPage, { media: [], nextCursor: null });
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].pathname, "/v27.0/17841400000000002/media");
+    assert.equal(requests[0].searchParams.get("limit"), "12");
+    assert.equal(
+      requests[0].searchParams.get("fields"),
+      "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp"
+    );
+    assert.equal(
+      requests[1].searchParams.get("after"),
+      "opaque-next-cursor"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram media rejects malformed pagination cursors", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return Response.json({ data: [] });
+  };
+
+  try {
+    await assert.rejects(
+      getInstagramMedia(
+        {
+          appId: "1234567890",
+          appSecret: "test-app-secret",
+          configId: "9876543210",
+          apiVersion: "v27.0",
+          redirectUri: "https://engage.example/api/instagram/callback",
+        },
+        "server-only-system-user-token",
+        "17841400000000002",
+        "x".repeat(513)
+      ),
+      { code: "meta_pagination_invalid" }
+    );
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram media pagination deduplicates by media ID", () => {
+  const firstPage = [
+    { id: "media-1", caption: "First" },
+    { id: "media-2", caption: "Second" },
+  ];
+  const nextPage = [
+    { id: "media-2", caption: "Duplicate" },
+    { id: "media-3", caption: "Third" },
+    { id: "media-3", caption: "Duplicate in page" },
+  ];
+
+  assert.deepEqual(deduplicateInstagramMedia(firstPage, nextPage), [
+    { id: "media-1", caption: "First" },
+    { id: "media-2", caption: "Second" },
+    { id: "media-3", caption: "Third" },
+  ]);
+});
+
+test("Instagram media timestamps are validated before display", () => {
+  assert.equal(isValidInstagramTimestamp("2026-11-10T12:00:00+0000"), true);
+  assert.equal(isValidInstagramTimestamp(""), false);
+  assert.equal(isValidInstagramTimestamp("not-a-timestamp"), false);
+
+  const component = readFileSync(
+    new URL(
+      "../src/app/(dashboard)/instagram/instagram-account-data.tsx",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(
+    component,
+    /isValidInstagramTimestamp\(item\.timestamp\)\s*&&\s*\(\s*<time/
+  );
+});
+
+test("Instagram account data requests abort on account change and stay independent", () => {
+  const component = readFileSync(
+    new URL(
+      "../src/app/(dashboard)/instagram/instagram-account-data.tsx",
+      import.meta.url
+    ),
+    "utf8"
+  );
+
+  assert.match(component, /const controller = new AbortController\(\)/);
+  assert.match(component, /controller\.abort\(\)/);
+  assert.match(component, /signal: controller\.signal/);
+  assert.match(component, /Promise\.all\(\[loadProfile\(\), loadInitialMedia\(\)\]\)/);
+  assert.match(component, /loadingMoreRequest\.current/);
+  assert.match(component, /aria-busy=\{loadingMore\}/);
+  assert.match(component, /aria-live="polite"/);
+  assert.doesNotMatch(component, /items-centerjustify-center/);
+});
+
+test("Instagram data routes scope token lookup to the authenticated owner", () => {
+  const contextSource = readFileSync(
+    new URL("../src/lib/instagram/account-data.ts", import.meta.url),
+    "utf8"
+  );
+  const profileRoute = readFileSync(
+    new URL("../src/app/api/instagram/profile/route.ts", import.meta.url),
+    "utf8"
+  );
+  const mediaRoute = readFileSync(
+    new URL("../src/app/api/instagram/media/route.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(contextSource, /supabase\.auth\.getUser\(\)/);
+  assert.match(
+    contextSource,
+    /\.eq\("id", accountId\)\s*\.eq\("owner_id", authData\.user\.id\)/
+  );
+  assert.equal(
+    (contextSource.match(/\.eq\("owner_id", authData\.user\.id\)/g) ?? [])
+      .length,
+    3
+  );
+  assert.ok(
+    contextSource.indexOf("decryptToken(connection.encrypted_access_token)") >
+      contextSource.indexOf('.eq("id", accountId)')
+  );
+  assert.doesNotMatch(profileRoute, /accessToken\s*:/);
+  assert.doesNotMatch(mediaRoute, /accessToken\s*:/);
+  assert.match(profileRoute, /"Cache-Control": "no-store"/);
+  assert.match(mediaRoute, /"Cache-Control": "no-store"/);
+});
+
 test("permission diagnostics distinguish missing token scopes and denied permission rows", async () => {
   const names = [
     "NEXT_PUBLIC_SITE_URL",
@@ -970,6 +1222,61 @@ test("Unified Login persistence migration keeps legacy tables and owner-checks a
   assert.doesNotMatch(
     migration,
     /DROP TABLE|DELETE FROM public\.instagram_business_connections|DELETE FROM public\.instagram_unified_login_connections/i
+  );
+});
+
+test("Instagram persistence ON CONFLICT targets have matching migration uniqueness", () => {
+  const initialSchema = readFileSync(
+    new URL(
+      "../supabase/migrations/20261109000001_initial_schema.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const directLoginMigration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261110000004_instagram_login_connections.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const unifiedLoginMigration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261110000005_instagram_unified_login.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const unifiedLoginPermissionsMigration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261111000001_unified_login_permissions.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+
+  assert.match(
+    directLoginMigration,
+    /CREATE UNIQUE INDEX unique_instagram_login_user_connection\s+ON public\.instagram_business_connections \(owner_id, instagram_user_id\)\s+WHERE login_type = 'INSTAGRAM_LOGIN'\s+AND instagram_user_id IS NOT NULL/
+  );
+  assert.match(
+    directLoginMigration,
+    /ON CONFLICT \(owner_id, instagram_user_id\)\s+WHERE login_type = 'INSTAGRAM_LOGIN'\s+AND instagram_user_id IS NOT NULL/
+  );
+  assert.match(
+    unifiedLoginMigration,
+    /CONSTRAINT unique_instagram_unified_login_business\s+UNIQUE \(owner_id, client_business_id\)/
+  );
+  for (const migration of [
+    unifiedLoginMigration,
+    unifiedLoginPermissionsMigration,
+  ]) {
+    assert.match(migration, /ON CONFLICT \(owner_id, client_business_id\)/);
+    assert.match(migration, /ON CONFLICT \(instagram_business_id\)/);
+  }
+  assert.match(
+    initialSchema,
+    /CONSTRAINT unique_instagram_business_id UNIQUE \(instagram_business_id\)/
   );
 });
 

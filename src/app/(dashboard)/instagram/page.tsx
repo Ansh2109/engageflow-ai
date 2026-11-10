@@ -15,6 +15,7 @@ import {
   reconnectUnifiedLoginConnection,
   refreshInstagramConnection,
 } from "./actions";
+import { InstagramAccountData } from "./instagram-account-data";
 import {
   isTokenExpired,
   isTokenRefreshDue,
@@ -91,7 +92,7 @@ export default async function InstagramPage({
   const { data: accounts, error: accountsError } = await supabase
     .from("instagram_accounts")
     .select(
-      "id, instagram_business_id, username, name, connection_status, connection_id, unified_connection_id, created_at"
+      "id, instagram_business_id, username, name, profile_picture_url, connection_status, connection_id, unified_connection_id, created_at"
     )
     .eq("owner_id", authData.user.id)
     .order("created_at", { ascending: true });
@@ -148,6 +149,12 @@ export default async function InstagramPage({
   }
 
   const connectedAccounts = accounts ?? [];
+  const systemUserConnectionIds = new Set([
+    ...(unifiedConnections ?? []).map((item) => item.id),
+    ...(connections ?? [])
+      .filter((item) => item.login_type === "UNIFIED_LOGIN")
+      .map((item) => item.id),
+  ]);
 
   return (
     <div className="flex max-w-3xl flex-col gap-8">
@@ -183,9 +190,9 @@ export default async function InstagramPage({
           {connectedAccounts.map((account) => (
             <article
               key={account.id}
-              className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 sm:flex-row sm:items-center"
+              className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5"
             >
-              <div className="flex min-w-0 flex-1 items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-muted">
                   <Instagram className="h-5 w-5 text-primary" />
                 </span>
@@ -206,6 +213,17 @@ export default async function InstagramPage({
                   </p>
                 </div>
               </div>
+
+              {(account.unified_connection_id ||
+                (account.connection_id &&
+                  systemUserConnectionIds.has(account.connection_id))) && (
+                <InstagramAccountData
+                  accountId={account.id}
+                  username={account.username}
+                  name={account.name}
+                  profilePictureUrl={account.profile_picture_url}
+                />
+              )}
 
               <form action={disconnectInstagramAccount}>
                 <input
