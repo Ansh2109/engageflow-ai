@@ -13,6 +13,7 @@ import { Instagram } from "@/components/icons/Instagram";
 import {
   disconnectInstagramAccount,
   refreshInstagramConnection,
+  refreshUnifiedLoginConnection,
 } from "./actions";
 import {
   isTokenExpired,
@@ -87,7 +88,7 @@ export default async function InstagramPage({
   const { data: accounts, error: accountsError } = await supabase
     .from("instagram_accounts")
     .select(
-      "id, instagram_business_id, username, name, connection_status, connection_id, created_at"
+      "id, instagram_business_id, username, name, connection_status, connection_id, unified_connection_id, created_at"
     )
     .eq("owner_id", authData.user.id)
     .order("created_at", { ascending: true });
@@ -109,19 +110,38 @@ export default async function InstagramPage({
     throw new Error("Unable to load Instagram connections.");
   }
 
+  const { data: unifiedConnections, error: unifiedConnectionsError } =
+    await admin
+      .from("instagram_unified_login_connections")
+      .select(
+        "id, client_business_id, system_user_id, token_expires_at, connection_status, updated_at"
+      )
+      .eq("owner_id", authData.user.id);
+  if (unifiedConnectionsError) {
+    throw new Error("Unable to load Unified Login connections.");
+  }
+
   const accountsByConnection = new Map<
+    string,
+    NonNullable<typeof accounts>
+  >();
+  const accountsByUnifiedConnection = new Map<
     string,
     NonNullable<typeof accounts>
   >();
 
   for (const account of accounts ?? []) {
-    if (!account.connection_id) continue;
-
-    const linked =
-      accountsByConnection.get(account.connection_id) ?? [];
-
-    linked.push(account);
-    accountsByConnection.set(account.connection_id, linked);
+    if (account.connection_id) {
+      const linked = accountsByConnection.get(account.connection_id) ?? [];
+      linked.push(account);
+      accountsByConnection.set(account.connection_id, linked);
+    }
+    if (account.unified_connection_id) {
+      const linked =
+        accountsByUnifiedConnection.get(account.unified_connection_id) ?? [];
+      linked.push(account);
+      accountsByUnifiedConnection.set(account.unified_connection_id, linked);
+    }
   }
 
   const connectedAccounts = accounts ?? [];
@@ -214,9 +234,9 @@ export default async function InstagramPage({
             </h2>
 
             <p className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
-              Authorize EngageFlow AI directly with your Instagram
-              professional account. A Facebook login or linked Facebook Page
-              is not required.
+              Connect your Instagram professional account using Meta Business
+              Login. The selected Meta configuration may require a Facebook
+              login and assigned Instagram business assets.
             </p>
           </div>
         </section>
@@ -252,12 +272,12 @@ export default async function InstagramPage({
             className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
           >
             <h2 className="font-semibold">
-              {isInstagramLogin ? "Instagram access" : "Legacy connection"}
+              {isInstagramLogin ? "Instagram Login (existing)" : "Legacy connection"}
             </h2>
 
             <p className="text-sm text-muted-foreground">
               {!isInstagramLogin
-                ? "This existing Unified Login connection is retained. Reconnect the account through Instagram Login to migrate it."
+                ? "This existing business connection is retained. New connections use the configured Meta Business Login flow."
                 : expired || connectionItem.connection_status === "EXPIRED"
                   ? "This Instagram token has expired. Reconnect the Instagram account to restore access."
                   : connectionItem.connection_status === "CONNECTED"
@@ -287,6 +307,51 @@ export default async function InstagramPage({
         );
       })}
 
+      {(unifiedConnections ?? []).map((connectionItem) => {
+        const linkedAccounts =
+          accountsByUnifiedConnection.get(connectionItem.id) ?? [];
+        if (linkedAccounts.length === 0) return null;
+
+        const expiresAt = connectionItem.token_expires_at;
+        const expired = isTokenExpired(expiresAt);
+        const refreshDue =
+          connectionItem.connection_status === "CONNECTED" &&
+          isTokenRefreshDue(expiresAt, connectionItem.updated_at);
+
+        return (
+          <section
+            key={connectionItem.id}
+            className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
+          >
+            <h2 className="font-semibold">Meta Business Login connection</h2>
+            <p className="text-sm text-muted-foreground">
+              {expired || connectionItem.connection_status === "EXPIRED"
+                ? "This System User token has expired. Reconnect to restore access."
+                : connectionItem.connection_status === "CONNECTED"
+                  ? expiresAt
+                    ? `System User token expires ${new Date(expiresAt).toLocaleDateString()}.`
+                    : `System User token for business ${connectionItem.client_business_id} has no recorded expiration.`
+                  : "This Meta Business Login connection needs to be reauthorized."}
+            </p>
+            {refreshDue && (
+              <form action={refreshUnifiedLoginConnection}>
+                <input
+                  type="hidden"
+                  name="connectionId"
+                  value={connectionItem.id}
+                />
+                <button
+                  type="submit"
+                  className="inline-flex h-9 items-center justify-center rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted"
+                >
+                  Refresh access
+                </button>
+              </form>
+            )}
+          </section>
+        );
+      })}
+
       <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6">
         <div className="flex items-center gap-2 font-semibold">
           <Shield className="h-5 w-5 text-primary" />
@@ -297,29 +362,30 @@ export default async function InstagramPage({
           <li>Instagram Business or Creator accounts are supported.</li>
 
           <li>
-            Authorization uses Instagram Login directly; a Facebook Page or
-            Business Manager asset assignment is not required.
+            Authorization uses the Facebook Login for Business configuration.
+            Instagram assets must be assigned to the configured System User.
           </li>
 
           <li>
-            Long-lived Instagram user tokens are encrypted and stored only on
-            the server. Each connected account has its own token.
+            System User access tokens are encrypted and stored server-side.
+            Meta validates the token type and granted permissions before
+            assigned Instagram accounts are saved.
           </li>
 
           <li>
             Disconnecting removes EngageFlow&apos;s local access. Revoke the
-            app&apos;s permissions in Instagram&apos;s Apps and Websites
-            settings to remove the grant itself.
+            app&apos;s permissions in Meta&apos;s Business Integrations settings
+            to remove the grant itself.
           </li>
         </ul>
 
         <a
-          href="https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/"
+          href="https://developers.facebook.com/documentation/facebook-login/facebook-login-for-business/"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
         >
-          Instagram Login documentation
+          Meta Business Login documentation
           <ExternalLink className="h-3 w-3" />
         </a>
       </section>

@@ -68,6 +68,7 @@ export interface Database {
           id: string;
           owner_id: string;
           connection_id: string | null;
+          unified_connection_id: string | null;
           instagram_business_id: string;
           facebook_page_id: string | null;
           username: string;
@@ -82,6 +83,7 @@ export interface Database {
           id?: string;
           owner_id: string;
           connection_id?: string | null;
+          unified_connection_id?: string | null;
           instagram_business_id: string;
           facebook_page_id?: string | null;
           username: string;
@@ -96,6 +98,7 @@ export interface Database {
           id?: string;
           owner_id?: string;
           connection_id?: string | null;
+          unified_connection_id?: string | null;
           instagram_business_id?: string;
           facebook_page_id?: string | null;
           username?: string;
@@ -119,6 +122,13 @@ export interface Database {
             columns: ["connection_id", "owner_id"];
             isOneToOne: false;
             referencedRelation: "instagram_business_connections";
+            referencedColumns: ["id", "owner_id"];
+          },
+          {
+            foreignKeyName: "fk_instagram_accounts_unified_connection_owner";
+            columns: ["unified_connection_id", "owner_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_unified_login_connections";
             referencedColumns: ["id", "owner_id"];
           },
         ];
@@ -172,6 +182,56 @@ export interface Database {
         Relationships: [
           {
             foreignKeyName: "instagram_business_connections_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      instagram_unified_login_connections: {
+        Row: {
+          id: string;
+          owner_id: string;
+          client_business_id: string;
+          system_user_id: string;
+          config_id: string;
+          encrypted_access_token: string;
+          token_expires_at: string | null;
+          scopes: string[];
+          connection_status: "CONNECTED" | "EXPIRED" | "REVOKED";
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          owner_id: string;
+          client_business_id: string;
+          system_user_id: string;
+          config_id: string;
+          encrypted_access_token: string;
+          token_expires_at?: string | null;
+          scopes?: string[];
+          connection_status?: "CONNECTED" | "EXPIRED" | "REVOKED";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          owner_id?: string;
+          client_business_id?: string;
+          system_user_id?: string;
+          config_id?: string;
+          encrypted_access_token?: string;
+          token_expires_at?: string | null;
+          scopes?: string[];
+          connection_status?: "CONNECTED" | "EXPIRED" | "REVOKED";
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_unified_login_connections_owner_id_fkey";
             columns: ["owner_id"];
             isOneToOne: false;
             referencedRelation: "users";
@@ -545,6 +605,19 @@ export interface Database {
           p_encrypted_access_token: string;
           p_token_expires_at: string;
           p_scopes: string[];
+        };
+        Returns: string;
+      };
+      persist_instagram_unified_login_connection: {
+        Args: {
+          p_owner_id: string;
+          p_client_business_id: string;
+          p_system_user_id: string;
+          p_config_id: string;
+          p_encrypted_access_token: string;
+          p_token_expires_at: string | null;
+          p_scopes: string[];
+          p_accounts: Json;
         };
         Returns: string;
       };

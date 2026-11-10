@@ -194,21 +194,26 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Exchange the code, extend the token, and resolve the authorized account.
+    // Exchange the code, verify its System User token and scopes, then discover
+    // the Instagram assets assigned to that System User.
     const token = await exchangeMetaCode(config, callback.code);
 
     const { error: persistError } = await admin.rpc(
-      "persist_instagram_login_connection",
+      "persist_instagram_unified_login_connection",
       {
         p_owner_id: authData.user.id,
-        p_instagram_user_id: token.account.id,
-        p_username: token.account.username,
-        p_name: token.account.name,
-        p_profile_picture_url: token.account.profilePictureUrl,
-        p_account_type: token.account.accountType,
+        p_client_business_id: token.clientBusinessId,
+        p_system_user_id: token.systemUserId,
+        p_config_id: config.configId,
         p_encrypted_access_token: encryptToken(token.accessToken),
         p_token_expires_at: token.expiresAt,
         p_scopes: token.scopes,
+        p_accounts: token.accounts.map((account) => ({
+          id: account.id,
+          username: account.username,
+          name: account.name,
+          profile_picture_url: account.profilePictureUrl,
+        })),
       }
     );
 

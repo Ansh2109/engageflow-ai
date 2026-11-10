@@ -1,5 +1,6 @@
 import "server-only";
 
+import { createHmac } from "node:crypto";
 import { getSiteUrl } from "../auth/site-url.ts";
 import {
   isValidMetaId,
@@ -19,6 +20,7 @@ export class MetaApiError extends Error {
 export type MetaConfig = {
   appId: string;
   appSecret: string;
+  configId: string;
   apiVersion: string;
   redirectUri: string;
 };
@@ -28,21 +30,26 @@ export type MetaInstagramAccount = {
   username: string;
   name: string | null;
   profilePictureUrl: string | null;
-  accountType: "BUSINESS" | "CREATOR" | "UNKNOWN";
 };
 
 export type ExchangedMetaToken = {
   accessToken: string;
-  expiresAt: string;
+  expiresAt: string | null;
   scopes: string[];
-  account: MetaInstagramAccount;
+  systemUserId: string;
+  clientBusinessId: string;
+  accounts: MetaInstagramAccount[];
 };
 
-type InstagramTokenResponse = {
-  access_token?: unknown;
-  expires_in?: unknown;
-  user_id?: unknown;
-  permissions?: unknown;
+type MetaTokenDebugInfo = {
+  scopes: string[];
+  systemUserId: string;
+  expiresAt: string | null;
+};
+
+type GraphRequestOptions = {
+  method?: "GET" | "POST";
+  params?: Record<string, string>;
 };
 
 function requiredEnv(name: string): string {
@@ -61,20 +68,26 @@ export function getMetaConfig(): MetaConfig {
 
   const appId = requiredEnv("META_APP_ID");
   if (!isValidMetaId(appId)) {
-    throw new Error("META_APP_ID must be the numeric Instagram App ID.");
+    throw new Error("META_APP_ID must be the numeric Meta App ID.");
+  }
+
+  const configId = requiredEnv("META_CONFIG_ID");
+  if (!isValidMetaId(configId)) {
+    throw new Error("META_CONFIG_ID must be the numeric Login configuration ID.");
   }
 
   const redirectUri = requiredEnv("META_REDIRECT_URI");
   const expectedRedirectUri = `${getSiteUrl()}/api/instagram/callback`;
   if (redirectUri !== expectedRedirectUri) {
     throw new Error(
-      "META_REDIRECT_URI must exactly match the configured Instagram callback URL."
+      "META_REDIRECT_URI must exactly match the configured Meta Login callback URL."
     );
   }
 
   return {
     appId,
     appSecret: requiredEnv("META_APP_SECRET"),
+    configId,
     apiVersion,
     redirectUri,
   };
@@ -82,9 +95,9 @@ export function getMetaConfig(): MetaConfig {
 
 function graphUrl(config: MetaConfig, path: string): URL {
   if (path.startsWith("/") || path.includes("..")) {
-    throw new Error("Invalid Instagram Graph API path.");
+    throw new Error("Invalid Meta Graph API path.");
   }
-  return new URL(`https://graph.instagram.com/${config.apiVersion}/${path}`);
+  return new URL(`https://graph.facebook.com/${config.apiVersion}/${path}`);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -93,26 +106,30 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function responseData(value: unknown): Record<string, unknown> | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  if (!("data" in record)) return record;
-
-  if (Array.isArray(record.data)) {
-    return record.data.length === 1 ? asRecord(record.data[0]) : null;
-  }
-  return asRecord(record.data);
+function appSecretProof(accessToken: string, appSecret: string): string {
+  return createHmac("sha256", appSecret).update(accessToken).digest("hex");
 }
 
 async function requestJson(
-  url: URL,
-  init: RequestInit,
-  failureCode: string
+  config: MetaConfig,
+  path: string,
+  accessToken: string,
+  { method = "GET", params = {} }: GraphRequestOptions = {}
 ): Promise<unknown> {
+  const url = graphUrl(config, path);
+  url.searchParams.set("access_token", accessToken);
+  url.searchParams.set(
+    "appsecret_proof",
+    appSecretProof(accessToken, config.appSecret)
+  );
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
   let response: Response;
   try {
     response = await fetch(url, {
-      ...init,
+      method,
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
@@ -131,98 +148,209 @@ async function requestJson(
     const root = asRecord(payload);
     const error = asRecord(root?.error);
     if (error?.code === 190) {
-      throw new MetaApiError("instagram_token_invalid");
+      throw new MetaApiError("meta_token_invalid");
     }
-    throw new MetaApiError(failureCode);
+    throw new MetaApiError("meta_request_failed");
   }
+
   return payload;
 }
 
-function tokenExpiry(expiresIn: unknown): string {
+function tokenExpiry(expiresAt: unknown): string | null {
+  if (expiresAt === 0) return null;
   if (
-    typeof expiresIn !== "number" ||
-    !Number.isFinite(expiresIn) ||
-    expiresIn <= 0
+    typeof expiresAt !== "number" ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= 0
   ) {
     throw new MetaApiError("meta_invalid_expiry");
   }
-  return new Date(Date.now() + expiresIn * 1000).toISOString();
+  return new Date(expiresAt * 1000).toISOString();
 }
 
-function accountType(value: unknown): MetaInstagramAccount["accountType"] {
-  if (typeof value !== "string") return "UNKNOWN";
-  if (value.toUpperCase() === "BUSINESS") return "BUSINESS";
-  if (
-    value.toUpperCase() === "MEDIA_CREATOR" ||
-    value.toUpperCase() === "CREATOR"
-  ) {
-    return "CREATOR";
-  }
-  return "UNKNOWN";
+function hasRequiredPermissions(scopes: string[]): boolean {
+  return META_REQUIRED_PERMISSIONS.every((permission) =>
+    scopes.includes(permission)
+  );
 }
 
-export async function getInstagramAccountIdentity(
+export async function debugMetaAccessToken(
   config: MetaConfig,
-  accessToken: string
-): Promise<MetaInstagramAccount> {
-  const url = graphUrl(config, "me");
+  inputToken: string
+): Promise<MetaTokenDebugInfo> {
+  const url = graphUrl(config, "debug_token");
+  url.searchParams.set("input_token", inputToken);
   url.searchParams.set(
-    "fields",
-    "id,user_id,username,name,profile_picture_url,account_type"
+    "access_token",
+    `${config.appId}|${config.appSecret}`
   );
-  url.searchParams.set("access_token", accessToken);
 
-  const payload = await requestJson(
-    url,
-    { method: "GET" },
-    "meta_identity_failed"
-  );
-  const identity = responseData(payload);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new MetaApiError("meta_token_debug_unavailable");
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new MetaApiError("meta_invalid_response");
+  }
+
+  if (!response.ok) {
+    throw new MetaApiError("meta_token_debug_failed");
+  }
+
+  const data = asRecord(asRecord(payload)?.data);
+  const scopes = data?.scopes;
   if (
-    !identity ||
-    !isValidMetaId(identity.user_id) ||
-    typeof identity.username !== "string" ||
-    identity.username.trim().length === 0 ||
-    identity.username.length > 255
+    data?.type !== "SYSTEM_USER" ||
+    data.is_valid !== true ||
+    data.app_id !== config.appId ||
+    !isValidMetaId(data.user_id) ||
+    !Array.isArray(scopes) ||
+    !scopes.every((scope) => typeof scope === "string")
   ) {
-    throw new MetaApiError("meta_identity_invalid");
+    throw new MetaApiError("meta_system_user_token_invalid");
+  }
+
+  const normalizedScopes = scopes as string[];
+  if (!hasRequiredPermissions(normalizedScopes)) {
+    throw new MetaApiError("meta_permissions_missing");
   }
 
   return {
-    id: identity.user_id,
-    username: identity.username,
-    name: typeof identity.name === "string" ? identity.name : null,
-    profilePictureUrl:
-      typeof identity.profile_picture_url === "string"
-        ? identity.profile_picture_url
-        : null,
-    accountType: accountType(identity.account_type),
+    systemUserId: data.user_id,
+    scopes: normalizedScopes,
+    expiresAt: tokenExpiry(data.expires_at),
   };
 }
 
-async function exchangeForLongLivedToken(
-  config: MetaConfig,
-  shortLivedToken: string
-): Promise<{ accessToken: string; expiresAt: string }> {
-  const url = new URL("https://graph.instagram.com/access_token");
-  url.searchParams.set("grant_type", "ig_exchange_token");
-  url.searchParams.set("client_secret", config.appSecret);
-  url.searchParams.set("access_token", shortLivedToken);
+type MetaBusinessIdentity = {
+  clientBusinessId: string;
+};
 
-  const payload = await requestJson(
-    url,
-    { method: "GET" },
-    "meta_long_lived_exchange_failed"
-  );
-  const token = asRecord(payload);
-  if (typeof token?.access_token !== "string" || !token.access_token) {
-    throw new MetaApiError("meta_long_lived_exchange_failed");
+async function getMetaBusinessIdentity(
+  config: MetaConfig,
+  accessToken: string,
+  systemUserId: string
+): Promise<MetaBusinessIdentity> {
+  const payload = await requestJson(config, "me", accessToken, {
+    params: { fields: "client_business_id" },
+  });
+  const identity = asRecord(payload);
+  if (!identity || !isValidMetaId(identity.client_business_id)) {
+    throw new MetaApiError("meta_business_identity_missing");
   }
 
-  return {
-    accessToken: token.access_token,
-    expiresAt: tokenExpiry(token.expires_in),
+  const permissionsPayload = await requestJson(
+    config,
+    `${systemUserId}/permissions`,
+    accessToken
+  );
+  const permissionRows = asRecord(permissionsPayload)?.data;
+  if (!Array.isArray(permissionRows)) {
+    throw new MetaApiError("meta_permissions_invalid");
+  }
+
+  const granted = new Set(
+    permissionRows.flatMap((row) => {
+      const permission = asRecord(row);
+      return permission?.status === "granted" &&
+        typeof permission.permission === "string"
+        ? [permission.permission]
+        : [];
+    })
+  );
+  if (!META_REQUIRED_PERMISSIONS.every((permission) => granted.has(permission))) {
+    throw new MetaApiError("meta_permissions_missing");
+  }
+
+  return { clientBusinessId: identity.client_business_id };
+}
+
+type AssignedInstagramAccountsResponse = {
+  data?: Array<{
+    id?: unknown;
+    username?: unknown;
+    name?: unknown;
+    profile_picture_url?: unknown;
+  }>;
+  paging?: {
+    cursors?: { after?: unknown };
+    next?: unknown;
   };
+};
+
+export async function getAssignedInstagramAccounts(
+  config: MetaConfig,
+  accessToken: string,
+  systemUserId: string
+): Promise<MetaInstagramAccount[]> {
+  if (!isValidMetaId(systemUserId)) {
+    throw new MetaApiError("meta_system_user_identity_invalid");
+  }
+
+  const accounts: MetaInstagramAccount[] = [];
+  const seenIds = new Set<string>();
+  let after: string | undefined;
+
+  for (let page = 0; page < 10; page += 1) {
+    const params: Record<string, string> = {
+      fields: "id,username,name,profile_picture_url",
+    };
+    if (after) params.after = after;
+
+    const payload = await requestJson(
+      config,
+      `${systemUserId}/assigned_instagram_accounts`,
+      accessToken,
+      { params }
+    );
+    const result = asRecord(payload) as
+      | AssignedInstagramAccountsResponse
+      | null;
+    if (!Array.isArray(result?.data)) {
+      throw new MetaApiError("meta_accounts_invalid_response");
+    }
+
+    for (const item of result.data) {
+      if (
+        !isValidMetaId(item.id) ||
+        typeof item.username !== "string" ||
+        item.username.trim().length === 0 ||
+        item.username.length > 255
+      ) {
+        throw new MetaApiError("meta_account_invalid");
+      }
+      if (seenIds.has(item.id)) continue;
+      seenIds.add(item.id);
+      accounts.push({
+        id: item.id,
+        username: item.username,
+        name: typeof item.name === "string" ? item.name : null,
+        profilePictureUrl:
+          typeof item.profile_picture_url === "string"
+            ? item.profile_picture_url
+            : null,
+      });
+    }
+
+    if (!result.paging?.next) return accounts;
+    const next = result.paging.cursors?.after;
+    if (typeof next !== "string" || next === after) {
+      throw new MetaApiError("meta_pagination_invalid");
+    }
+    after = next;
+  }
+
+  throw new MetaApiError("meta_account_limit_exceeded");
 }
 
 export async function exchangeMetaCode(
@@ -233,53 +361,206 @@ export async function exchangeMetaCode(
     throw new MetaApiError("oauth_code_invalid");
   }
 
-  const form = new FormData();
-  form.set("client_id", config.appId);
-  form.set("client_secret", config.appSecret);
-  form.set("grant_type", "authorization_code");
-  form.set("redirect_uri", config.redirectUri);
-  form.set("code", code);
+  const url = graphUrl(config, "oauth/access_token");
+  url.searchParams.set("client_id", config.appId);
+  url.searchParams.set("client_secret", config.appSecret);
+  url.searchParams.set("redirect_uri", config.redirectUri);
+  url.searchParams.set("code", code);
 
-  const shortLivedPayload = await requestJson(
-    new URL("https://api.instagram.com/oauth/access_token"),
-    { method: "POST", body: form },
-    "meta_token_exchange_failed"
-  );
-  const shortLived = responseData(shortLivedPayload) as
-    | InstagramTokenResponse
-    | null;
-  if (
-    typeof shortLived?.access_token !== "string" ||
-    !shortLived.access_token ||
-    !isValidMetaId(shortLived.user_id) ||
-    typeof shortLived.permissions !== "string"
-  ) {
-    throw new MetaApiError("meta_token_exchange_invalid");
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new MetaApiError("meta_unavailable");
   }
 
-  const grantedScopes = shortLived.permissions
-    .split(",")
-    .map((permission) => permission.trim())
-    .filter(Boolean);
-  if (
-    !META_REQUIRED_PERMISSIONS.every((permission) =>
-      grantedScopes.includes(permission)
-    )
-  ) {
-    throw new MetaApiError("meta_permissions_missing");
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new MetaApiError("meta_invalid_response");
   }
 
-  const token = await exchangeForLongLivedToken(
+  const tokenResponse = asRecord(payload);
+  if (
+    !response.ok ||
+    typeof tokenResponse?.access_token !== "string" ||
+    tokenResponse.access_token.length === 0
+  ) {
+    throw new MetaApiError("meta_token_exchange_failed");
+  }
+
+  const accessToken = tokenResponse.access_token;
+  const tokenInfo = await debugMetaAccessToken(config, accessToken);
+  const identity = await getMetaBusinessIdentity(
     config,
-    shortLived.access_token
+    accessToken,
+    tokenInfo.systemUserId
   );
-  const account = await getInstagramAccountIdentity(config, token.accessToken);
+  const accounts = await getAssignedInstagramAccounts(
+    config,
+    accessToken,
+    tokenInfo.systemUserId
+  );
+  if (accounts.length === 0) {
+    throw new MetaApiError("meta_accounts_missing");
+  }
 
   return {
-    ...token,
-    account,
-    scopes: grantedScopes,
+    accessToken,
+    expiresAt: tokenInfo.expiresAt,
+    scopes: tokenInfo.scopes,
+    systemUserId: tokenInfo.systemUserId,
+    clientBusinessId: identity.clientBusinessId,
+    accounts,
   };
+}
+
+export async function refreshSystemUserToken(
+  config: MetaConfig,
+  accessToken: string,
+  clientBusinessId: string,
+  systemUserId: string,
+  instagramAccountIds: string[]
+): Promise<{ accessToken: string; expiresAt: string | null }> {
+  if (
+    !isValidMetaId(clientBusinessId) ||
+    !isValidMetaId(systemUserId) ||
+    instagramAccountIds.length === 0 ||
+    instagramAccountIds.some((id) => !isValidMetaId(id))
+  ) {
+    throw new MetaApiError("meta_business_identity_missing");
+  }
+
+  const currentTokenInfo = await debugMetaAccessToken(config, accessToken);
+  if (currentTokenInfo.systemUserId !== systemUserId) {
+    throw new MetaApiError("meta_system_user_identity_invalid");
+  }
+  const currentIdentity = await getMetaBusinessIdentity(
+    config,
+    accessToken,
+    systemUserId
+  );
+  if (currentIdentity.clientBusinessId !== clientBusinessId) {
+    throw new MetaApiError("meta_business_identity_mismatch");
+  }
+
+  const currentAccounts = await getAssignedInstagramAccounts(
+    config,
+    accessToken,
+    systemUserId
+  );
+  const currentAccountIds = new Set(currentAccounts.map((account) => account.id));
+  if (instagramAccountIds.some((id) => !currentAccountIds.has(id))) {
+    throw new MetaApiError("meta_account_identity_mismatch");
+  }
+
+  const payload = await requestJson(
+    config,
+    `${clientBusinessId}/system_user_access_tokens`,
+    accessToken,
+    {
+      method: "POST",
+      params: {
+        system_user_id: systemUserId,
+        asset: instagramAccountIds.join(","),
+        scope: META_REQUIRED_PERMISSIONS.join(","),
+        set_token_expires_in_60_days: "true",
+      },
+    }
+  );
+  const refreshed = asRecord(payload);
+  if (typeof refreshed?.access_token !== "string" || !refreshed.access_token) {
+    throw new MetaApiError("meta_refresh_failed");
+  }
+
+  const refreshedInfo = await debugMetaAccessToken(
+    config,
+    refreshed.access_token
+  );
+  if (refreshedInfo.systemUserId !== systemUserId) {
+    throw new MetaApiError("meta_system_user_identity_invalid");
+  }
+  const refreshedIdentity = await getMetaBusinessIdentity(
+    config,
+    refreshed.access_token,
+    systemUserId
+  );
+  if (refreshedIdentity.clientBusinessId !== clientBusinessId) {
+    throw new MetaApiError("meta_business_identity_mismatch");
+  }
+
+  const refreshedAccounts = await getAssignedInstagramAccounts(
+    config,
+    refreshed.access_token,
+    systemUserId
+  );
+  const refreshedAccountIds = new Set(
+    refreshedAccounts.map((account) => account.id)
+  );
+  if (instagramAccountIds.some((id) => !refreshedAccountIds.has(id))) {
+    throw new MetaApiError("meta_account_identity_mismatch");
+  }
+
+  return {
+    accessToken: refreshed.access_token,
+    expiresAt: refreshedInfo.expiresAt,
+  };
+}
+
+async function instagramLoginRequest(
+  url: URL,
+  failureCode: string
+): Promise<Record<string, unknown>> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new MetaApiError("meta_unavailable");
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new MetaApiError("meta_invalid_response");
+  }
+
+  if (!response.ok) {
+    const error = asRecord(asRecord(payload)?.error);
+    if (error?.code === 190) {
+      throw new MetaApiError("instagram_token_invalid");
+    }
+    throw new MetaApiError(failureCode);
+  }
+
+  const record = asRecord(payload);
+  if (!record) throw new MetaApiError("meta_invalid_response");
+  return record;
+}
+
+async function getInstagramLoginUserId(
+  config: MetaConfig,
+  accessToken: string
+): Promise<string> {
+  const url = new URL(
+    `https://graph.instagram.com/${config.apiVersion}/me`
+  );
+  url.searchParams.set("fields", "user_id");
+  url.searchParams.set("access_token", accessToken);
+  const identity = await instagramLoginRequest(url, "meta_identity_failed");
+  if (!isValidMetaId(identity.user_id)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+  return identity.user_id;
 }
 
 export async function refreshInstagramLongLivedToken(
@@ -290,36 +571,44 @@ export async function refreshInstagramLongLivedToken(
   if (!isValidMetaId(expectedInstagramUserId)) {
     throw new MetaApiError("meta_identity_invalid");
   }
-
-  const currentIdentity = await getInstagramAccountIdentity(config, accessToken);
-  if (currentIdentity.id !== expectedInstagramUserId) {
+  if (
+    (await getInstagramLoginUserId(config, accessToken)) !==
+    expectedInstagramUserId
+  ) {
     throw new MetaApiError("meta_identity_mismatch");
   }
 
-  const url = new URL("https://graph.instagram.com/refresh_access_token");
+  const url = new URL(
+    "https://graph.instagram.com/refresh_access_token"
+  );
   url.searchParams.set("grant_type", "ig_refresh_token");
   url.searchParams.set("access_token", accessToken);
-
-  const payload = await requestJson(
+  const refreshed = await instagramLoginRequest(
     url,
-    { method: "GET" },
     "meta_token_refresh_failed"
   );
-  const refreshed = asRecord(payload);
-  if (typeof refreshed?.access_token !== "string" || !refreshed.access_token) {
+  if (
+    typeof refreshed.access_token !== "string" ||
+    !refreshed.access_token
+  ) {
     throw new MetaApiError("meta_token_refresh_failed");
   }
-
-  const result = {
-    accessToken: refreshed.access_token,
-    expiresAt: tokenExpiry(refreshed.expires_in),
-  };
-  const refreshedIdentity = await getInstagramAccountIdentity(
-    config,
-    result.accessToken
-  );
-  if (refreshedIdentity.id !== expectedInstagramUserId) {
+  if (
+    (await getInstagramLoginUserId(config, refreshed.access_token)) !==
+    expectedInstagramUserId
+  ) {
     throw new MetaApiError("meta_identity_mismatch");
   }
-  return result;
+  const expiresIn = refreshed.expires_in;
+  if (
+    typeof expiresIn !== "number" ||
+    !Number.isFinite(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    throw new MetaApiError("meta_invalid_expiry");
+  }
+  return {
+    accessToken: refreshed.access_token,
+    expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+  };
 }

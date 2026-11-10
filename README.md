@@ -25,66 +25,76 @@ Run the auth flow tests with `npm run test:auth` (Node.js with built-in TypeScri
 
 ## Instagram Login
 
-Instagram connections use Meta's **Business Login for Instagram** (Instagram
-Login), not Facebook Login for Business or a System User token. A customer
-authorizes their Instagram Business or Creator account directly; a linked
-Facebook Page and Business Manager asset assignment are not required.
-Supabase remains the application's login provider, and all Instagram OAuth
-exchanges run on the server.
+New Instagram connections use the app's **Facebook Login for Business**
+configuration for **Instagram API with Facebook Login / Unified Login**. This
+is required for newer Meta apps where standalone Instagram Login setup is
+unavailable. The current configuration is set to return a Business Integration
+System User token and must be configured as Instagram Login Compatible.
+Supabase remains the application's login provider; Meta authorization,
+token exchange, validation, and asset discovery run on the server.
 
 Set these additional environment variables on the server:
 
 ```text
 META_APP_ID=<Meta app ID>
 META_APP_SECRET=<Meta app secret; server-only>
+META_CONFIG_ID=<Facebook Login for Business configuration ID>
 META_API_VERSION=v27.0
 META_REDIRECT_URI=<NEXT_PUBLIC_SITE_URL>/api/instagram/callback
 TOKEN_ENCRYPTION_KEY=<64-character hexadecimal AES-256 key>
 ```
 
-`META_REDIRECT_URI` must exactly match the OAuth redirect URI configured in
-Meta. Do not prefix the app secret or encryption key with `NEXT_PUBLIC_`, and
-do not commit real credentials. `.env.example` lists the complete variable
-names needed by the app; `META_API_VERSION` defaults to `v27.0`.
+`META_APP_ID` is the general Meta App ID; `META_CONFIG_ID` identifies the
+Business Login configuration. `META_REDIRECT_URI` must exactly match the
+valid OAuth redirect URI registered in Meta. Do not prefix the app secret or
+encryption key with `NEXT_PUBLIC_`, and do not commit real credentials.
+`.env.example` lists the complete variable names needed by the app;
+`META_API_VERSION` defaults to `v27.0`.
 
 In Meta's App Dashboard:
 
-1. Use a **Business** app and add **Instagram API with Instagram Login**.
-   Configure Business Login for Instagram and copy its Instagram App ID and
-   App Secret into the server-side variables above.
-2. Add `<app-origin>/api/instagram/callback` to the Instagram Login OAuth
-   redirect URI allowlist. Meta's callback is separate from the Supabase
-   `/api/auth/callback`.
-3. Configure `instagram_business_basic`,
-   `instagram_business_manage_messages`,
-   `instagram_business_manage_comments`, and
-   `instagram_business_content_publish`. The OAuth request explicitly sets
-   `enable_fb_login=false`.
-4. For customer accounts outside the app's own testers, request the required
+1. Use a **Business** app and configure **Facebook Login for Business** with
+   the **Instagram API (Unified Login)** configuration. Select
+   **Business Integration System User** as the access-token type and ensure
+   the configuration is Instagram Login Compatible.
+2. Register `<app-origin>/api/instagram/callback` as a valid OAuth redirect
+   URI and set the same value as `META_REDIRECT_URI`. This callback is separate
+   from the Supabase `/api/auth/callback`.
+3. Copy the Meta App ID, App Secret, and Business Login configuration ID into
+   the server-side environment variables above. Never use an Instagram App ID
+   from the standalone Instagram Login setup.
+4. Configure and request `instagram_basic`, `instagram_manage_comments`,
+   `instagram_manage_messages`, and `instagram_content_publish`. Also grant
+   `business_management` because the configured System User token refresh
+   operation uses Meta's System User access-token management endpoint, which
+   requires that permission. The app validates granted permissions from Meta's
+   token and permissions responses before persisting a connection.
+5. Assign the Instagram professional accounts to the configured System User.
+   The app discovers only Instagram accounts assigned to that System User.
+6. For customers outside the app's roles/testers, request the required
    Advanced Access through Meta App Review and complete Business Verification
-   where Meta requires it. Configure the app as **Live** for production
-   webhooks.
-5. To receive Instagram webhook events, configure the HTTPS callback, verify
-   token, and webhook fields in Meta, then subscribe each authorized account
-   using its Instagram User token. `comments` needs basic + manage-comments
-   permissions and `messages` needs basic + manage-messages permissions. See
-   Meta's [Instagram Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login),
-   [Business Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login),
+   where Meta requires it. Configure the app as **Live** for production.
+7. To receive Instagram webhook events, configure the HTTPS callback, verify
+   token, and webhook fields in Meta, then subscribe each authorized account.
+   See Meta's [Facebook Login for Business](https://developers.facebook.com/documentation/facebook-login/facebook-login-for-business),
+   [Instagram API with Facebook Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login),
+   [System User assigned Instagram accounts](https://developers.facebook.com/documentation/ads-commerce/marketing-api/reference/system-user/assigned_instagram_accounts),
+   [System User access token management](https://developers.facebook.com/documentation/graph-api/reference/business/system_user_access_tokens),
    [webhook setup](https://developers.facebook.com/documentation/instagram-platform/webhooks/setup),
    [webhook permissions](https://developers.facebook.com/documentation/instagram-platform/webhooks/fields),
-   [messaging](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/messaging-api),
+   [messaging](https://developers.facebook.com/documentation/business-messaging/instagram-messaging),
    [comment moderation](https://developers.facebook.com/documentation/instagram-platform/comment-moderation), and
    [content publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing)
    documentation.
 
 The server validates the authenticated Supabase user, a signed and single-use
-OAuth state, callback parameters, granted scopes, and Instagram account
-identity. It exchanges the authorization code for a short-lived token,
-upgrades it to a 60-day token, encrypts it with AES-256-GCM, then stores it with
-the Instagram professional account ID. The dashboard refresh action validates
-the token and refreshes it only when due; Meta requires the existing long-lived
-token to be valid and at least 24 hours old. Tokens and OAuth codes are never
-sent to browser code or written to application logs.
+OAuth state, callback parameters, the returned token's `SYSTEM_USER` type, app
+identity, business identity, granted scopes, and assigned Instagram assets.
+It exchanges the authorization code at Meta's Graph OAuth endpoint, encrypts
+the System User token with AES-256-GCM, and stores it with its business and
+System User IDs. The dashboard refresh action validates and renews expiring
+System User tokens only when due. Tokens, authorization codes, and secrets are
+never sent to browser code or written to application logs.
 
 Before using this integration, apply these additive migrations in order to the
 intended database:
@@ -93,18 +103,22 @@ intended database:
 2. `supabase/migrations/20261110000002_atomic_instagram_connection.sql`
 3. `supabase/migrations/20261110000003_instagram_oauth_state.sql`
 4. `supabase/migrations/20261110000004_instagram_login_connections.sql`
+5. `supabase/migrations/20261110000005_instagram_unified_login.sql`
 
-The fourth migration adds Instagram Login rows and a service-role-only
-connection RPC. It retains existing Unified Login connection columns and data;
-the legacy persistence RPC also remains for backward compatibility. The
-migration does not delete or transform existing connections or
-`instagram_account_tokens`. Reconnecting an existing account through Instagram
-Login links that account to the new token without deleting legacy rows. Apply
-these migrations manually; the app does not apply them automatically.
+The fifth migration adds a separate table, account relationship, and
+service-role-only RPC for the Unified Login System User token flow. It only
+adds a nullable account-link column and does not drop or rewrite any existing
+columns, connections, or token records.
+Existing legacy and direct Instagram Login connections remain in their
+original table; when an account is reconnected through Unified Login, only its
+account link changes. The migration does not delete customer accounts or
+connection rows. Apply this migration manually; the app does not apply it
+automatically.
 
-Disconnecting deletes the local account link and its now-unused connection
-record. To revoke the Instagram grant itself, the user must also remove
-EngageFlow from Instagram's **Apps and Websites** settings.
+Disconnecting deletes the local account record and may remove its now-unused
+Unified Login token; unrelated legacy and direct Instagram Login connection
+records are not deleted. To revoke the Meta grant itself, the user must also
+remove EngageFlow from the connected Meta Business integration.
 
 **Repository limitation:** this source tree currently has no Instagram webhook
 route, account webhook-subscription call, or automation event processor. It

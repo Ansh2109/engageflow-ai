@@ -18,6 +18,7 @@ export interface Env {
   // Meta / Instagram (Phase 4)
   metaAppId: string;
   metaAppSecret: string;
+  metaConfigId: string;
   metaApiVersion: string;
   metaRedirectUri: string;
 
@@ -34,6 +35,7 @@ export function getEnv(): Env {
     siteUrl: process.env.NEXT_PUBLIC_SITE_URL,
     metaAppId: process.env.META_APP_ID,
     metaAppSecret: process.env.META_APP_SECRET,
+    metaConfigId: process.env.META_CONFIG_ID,
     metaApiVersion: process.env.META_API_VERSION ?? "v27.0",
     metaRedirectUri: process.env.META_REDIRECT_URI,
     tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
