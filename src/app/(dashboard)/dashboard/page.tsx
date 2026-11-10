@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import Link from "next/link";
+import { connection } from "next/server";
 import {
   Zap,
   Pause,
@@ -17,6 +18,7 @@ export const metadata: Metadata = {
 };
 
 async function InstagramConnectionBanner() {
+  await connection();
   const supabase = await createClient();
   const { data: authData, error: authError } = await supabase.auth.getUser();
   if (authError || !authData.user) return null;

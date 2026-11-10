@@ -1,6 +1,8 @@
+
 import type { Metadata } from "next";
 import { Activity } from "lucide-react";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -27,9 +29,17 @@ function formatEventType(value: string) {
 }
 
 export default async function ActivityPage() {
+  // Ensure request-time rendering before Supabase Auth loads the session.
+  await connection();
+
   const supabase = await createClient();
-  const { data: authData, error: authError } = await supabase.auth.getUser();
-  if (authError || !authData.user) redirect("/login?redirectTo=%2Factivity");
+
+  const { data: authData, error: authError } =
+    await supabase.auth.getUser();
+
+  if (authError || !authData.user) {
+    redirect("/login?redirectTo=%2Factivity");
+  }
 
   const { data: entries, error } = await supabase
     .from("activity_logs")
@@ -37,7 +47,10 @@ export default async function ActivityPage() {
     .eq("owner_id", authData.user.id)
     .order("created_at", { ascending: false })
     .limit(50);
-  if (error) throw new Error("Unable to load activity logs.");
+
+  if (error) {
+    throw new Error("Unable to load activity logs.");
+  }
 
   return (
     <div className="flex flex-col gap-8">
@@ -55,13 +68,24 @@ export default async function ActivityPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/50">
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Time</th>
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Event type</th>
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Action</th>
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Keyword</th>
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Status</th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                  Time
+                </th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                  Event type
+                </th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                  Action
+                </th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                  Keyword
+                </th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                  Status
+                </th>
               </tr>
             </thead>
+
             <tbody>
               {entries.length === 0 ? (
                 <tr>
@@ -70,7 +94,9 @@ export default async function ActivityPage() {
                       <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
                         <Activity className="h-5 w-5 text-muted-foreground" />
                       </div>
-                      <p className="mb-1 font-medium">No events recorded yet</p>
+                      <p className="mb-1 font-medium">
+                        No events recorded yet
+                      </p>
                       <p className="max-w-xs text-sm text-muted-foreground">
                         Connection events and future automation activity will
                         appear here.
@@ -80,17 +106,24 @@ export default async function ActivityPage() {
                 </tr>
               ) : (
                 entries.map((entry) => (
-                  <tr key={entry.id} className="border-b border-border last:border-0">
+                  <tr
+                    key={entry.id}
+                    className="border-b border-border last:border-0"
+                  >
                     <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
                       {new Date(entry.created_at).toLocaleString()}
                     </td>
+
                     <td className="px-4 py-3 font-medium">
                       {formatEventType(entry.event_type)}
                     </td>
+
                     <td className="px-4 py-3 text-muted-foreground">
                       {formatEventType(entry.action_type)}
                     </td>
+
                     <td className="px-4 py-3 text-muted-foreground">—</td>
+
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${
@@ -112,7 +145,10 @@ export default async function ActivityPage() {
       {/* Status legend */}
       <div className="flex flex-wrap gap-2">
         {Object.entries(statusStyles).map(([status, cls]) => (
-          <span key={status} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${cls}`}>
+          <span
+            key={status}
+            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${cls}`}
+          >
             {status}
           </span>
         ))}

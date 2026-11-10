@@ -1,5 +1,7 @@
+
 import { Suspense } from "react";
 import type { Metadata } from "next";
+import { connection } from "next/server";
 import { User, Bell, Trash2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { ProfileSettingsForm } from "@/components/dashboard/ProfileSettingsForm";
@@ -9,16 +11,21 @@ export const metadata: Metadata = {
 };
 
 async function ProfileData() {
+  // Wait for the incoming request before initializing Supabase Auth.
+  await connection();
+
   let userEmail = "";
   let userFullName = "";
 
   try {
     const supabase = await createClient();
     const { data } = await supabase.auth.getUser();
+
     userEmail = data.user?.email ?? "";
-    userFullName = (data.user?.user_metadata?.full_name as string) ?? "";
+    userFullName =
+      (data.user?.user_metadata?.full_name as string) ?? "";
   } catch {
-    // Graceful fallback during static build / initial setup
+    // Graceful fallback if profile data cannot be loaded.
   }
 
   return (
@@ -56,6 +63,7 @@ export default function SettingsPage() {
           <User className="h-4 w-4 text-primary" />
           Profile
         </div>
+
         <div className="p-5">
           <Suspense fallback={<ProfileSkeleton />}>
             <ProfileData />
@@ -69,6 +77,7 @@ export default function SettingsPage() {
           <Bell className="h-4 w-4 text-primary" />
           Notifications
         </div>
+
         <div className="p-5">
           <p className="text-sm text-muted-foreground">
             Notification preferences will be available in a future phase.
@@ -82,11 +91,13 @@ export default function SettingsPage() {
           <Trash2 className="h-4 w-4" />
           Danger zone
         </div>
+
         <div className="p-5 flex flex-col gap-3">
           <p className="text-sm text-muted-foreground">
             Permanently delete your account and all associated data. This action cannot
             be undone.
           </p>
+
           <button
             disabled
             className="self-start border border-destructive text-destructive text-sm font-medium px-4 py-2 rounded-lg hover:bg-destructive/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
