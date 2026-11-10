@@ -213,6 +213,12 @@ export async function getMetaBusinessIdentity(
     accessToken,
     { fields: "id,client_business_id" }
   );
+    console.error("[Instagram] Meta identity response shape.", {
+    fields: Object.keys(identity),
+    hasId: typeof identity.id === "string",
+    hasClientBusinessId:
+      typeof identity.client_business_id === "string",
+  });
   if (
     typeof identity.id !== "string" ||
     !/^\d+$/.test(identity.id) ||
