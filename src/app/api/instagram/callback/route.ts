@@ -8,6 +8,7 @@ import {
   getMetaConfig,
   MetaApiError,
 } from "@/lib/instagram/meta";
+import { logInstagramPersistenceError } from "@/lib/instagram/diagnostics";
 
 import { encryptToken } from "@/lib/crypto";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
@@ -193,31 +194,58 @@ export async function GET(request: Request) {
     return instagramRedirect(callback.status);
   }
 
+  let stage = "code_exchange";
+  let token: Awaited<ReturnType<typeof exchangeMetaCode>> | undefined;
   try {
     // Exchange the code, verify its System User token and scopes, then discover
     // the Instagram assets assigned to that System User.
-    const token = await exchangeMetaCode(config, callback.code);
+    token = await exchangeMetaCode(config, callback.code, (nextStage) => {
+      stage = nextStage;
+    });
 
+    stage = "token_encryption";
+    const encryptedAccessToken = encryptToken(token.accessToken);
+
+    stage = "database_persistence";
+    const persistenceArgs = {
+      p_owner_id: authData.user.id,
+      p_client_business_id: token.clientBusinessId,
+      p_system_user_id: token.systemUserId,
+      p_config_id: config.configId,
+      p_encrypted_access_token: encryptedAccessToken,
+      p_token_expires_at: token.expiresAt,
+      p_scopes: token.scopes,
+      p_accounts: token.accounts.map((account) => ({
+        id: account.id,
+        username: account.username,
+        name: account.name,
+        profile_picture_url: account.profilePictureUrl,
+      })),
+    };
     const { error: persistError } = await admin.rpc(
       "persist_instagram_unified_login_connection",
-      {
-        p_owner_id: authData.user.id,
-        p_client_business_id: token.clientBusinessId,
-        p_system_user_id: token.systemUserId,
-        p_config_id: config.configId,
-        p_encrypted_access_token: encryptToken(token.accessToken),
-        p_token_expires_at: token.expiresAt,
-        p_scopes: token.scopes,
-        p_accounts: token.accounts.map((account) => ({
-          id: account.id,
-          username: account.username,
-          name: account.name,
-          profile_picture_url: account.profilePictureUrl,
-        })),
-      }
+      persistenceArgs
     );
 
     if (persistError) {
+      logInstagramPersistenceError(persistError, [
+        callback.code,
+        config.appSecret,
+        config.configId,
+        token.accessToken,
+        encryptedAccessToken,
+        authData.user.id,
+        token.clientBusinessId,
+        token.systemUserId,
+        token.expiresAt ?? "",
+        ...token.scopes,
+        ...token.accounts.flatMap((account) => [
+          account.id,
+          account.username,
+          account.name ?? "",
+          account.profilePictureUrl ?? "",
+        ]),
+      ]);
       if (
         persistError.message ===
         "instagram_account_already_connected"
@@ -239,7 +267,7 @@ export async function GET(request: Request) {
 
     console.error(
       "[Instagram] OAuth connection failed.",
-      failureCode
+      { stage, failureCode }
     );
 
     await writeActivityLog(admin, {

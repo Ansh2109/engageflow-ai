@@ -57,6 +57,12 @@ type GraphRequestOptions = {
   params?: Record<string, string>;
 };
 
+export type MetaExchangeStage =
+  | "code_exchange"
+  | "token_validation"
+  | "business_identity"
+  | "instagram_account_discovery";
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -431,12 +437,14 @@ export async function getAssignedInstagramAccounts(
 
 export async function exchangeMetaCode(
   config: MetaConfig,
-  code: string
+  code: string,
+  onStage?: (stage: MetaExchangeStage) => void
 ): Promise<ExchangedMetaToken> {
   if (!code || code.length > 2048 || /[\u0000-\u001f]/.test(code)) {
     throw new MetaApiError("oauth_code_invalid");
   }
 
+  onStage?.("code_exchange");
   const url = graphUrl(config, "oauth/access_token");
   url.searchParams.set("client_id", config.appId);
   url.searchParams.set("client_secret", config.appSecret);
@@ -471,12 +479,15 @@ export async function exchangeMetaCode(
   }
 
   const accessToken = tokenResponse.access_token;
+  onStage?.("token_validation");
   const tokenInfo = await debugMetaAccessToken(config, accessToken);
+  onStage?.("business_identity");
   const identity = await getMetaBusinessIdentity(
     config,
     accessToken,
     tokenInfo.systemUserId
   );
+  onStage?.("instagram_account_discovery");
   const accounts = await getAssignedInstagramAccounts(
     config,
     accessToken,

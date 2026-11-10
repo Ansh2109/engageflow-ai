@@ -25,6 +25,10 @@ import {
   MetaApiError,
   refreshInstagramLongLivedToken,
 } from "../src/lib/instagram/meta.ts";
+import {
+  logInstagramPersistenceError,
+  sanitizeDatabaseErrorMessage,
+} from "../src/lib/instagram/diagnostics.ts";
 
 test("OAuth URL invokes the configured Facebook Login for Business flow", () => {
   const url = buildMetaAuthorizationUrl(
@@ -487,6 +491,7 @@ test("code exchange validates the System User token, scopes, identity, and assig
   );
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: URL; method: string }> = [];
+  const stages: string[] = [];
   const startedAt = Date.now();
   const permissions = [
     "instagram_basic",
@@ -550,7 +555,11 @@ test("code exchange validates the System User token, scopes, identity, and assig
 
   try {
     const config = getMetaConfig();
-    const token = await exchangeMetaCode(config, "one-time-code");
+    const token = await exchangeMetaCode(
+      config,
+      "one-time-code",
+      (stage) => stages.push(stage)
+    );
     assert.equal(token.accessToken, "system-user-token");
     assert.equal(token.systemUserId, "10000000001");
     assert.equal(token.clientBusinessId, "20000000002");
@@ -563,6 +572,12 @@ test("code exchange validates the System User token, scopes, identity, and assig
       profilePictureUrl: "https://example.test/profile.jpg",
     });
     assert.ok(Date.parse(token.expiresAt ?? "") > startedAt);
+    assert.deepEqual(stages, [
+      "code_exchange",
+      "token_validation",
+      "business_identity",
+      "instagram_account_discovery",
+    ]);
 
     assert.equal(requests.length, 5);
     assert.equal(requests[0].method, "GET");
@@ -762,6 +777,87 @@ test("permission diagnostics distinguish missing token scopes and denied permiss
       else process.env[name] = value;
     }
   }
+});
+
+test("persistence diagnostics retain SQLSTATE and sanitize private values", () => {
+  const originalError = console.error;
+  const diagnostics: unknown[] = [];
+  console.error = (...args: unknown[]) => diagnostics.push(args);
+
+  try {
+    logInstagramPersistenceError(
+      {
+        code: "23505",
+        message:
+          'duplicate key for account 17841400000000002 user 123e4567-e89b-12d3-a456-426614174000 "private_value"',
+      },
+      [
+        "authorization-code-secret",
+        "app-secret-value",
+        "access-token-value",
+        "encrypted-token-value",
+        "private-user-id",
+      ]
+    );
+
+    const serialized = JSON.stringify(diagnostics);
+    assert.equal(serialized.includes("23505"), true);
+    assert.equal(serialized.includes("database_persistence"), true);
+    assert.equal(serialized.includes("authorization-code-secret"), false);
+    assert.equal(serialized.includes("app-secret-value"), false);
+    assert.equal(serialized.includes("access-token-value"), false);
+    assert.equal(serialized.includes("encrypted-token-value"), false);
+    assert.equal(serialized.includes("private-user-id"), false);
+    assert.equal(serialized.includes("17841400000000002"), false);
+    assert.equal(
+      serialized.includes("123e4567-e89b-12d3-a456-426614174000"),
+      false
+    );
+    assert.equal(serialized.includes("private_value"), false);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("database error messages are bounded and non-string messages are generic", () => {
+  const sanitizedLongMessage = sanitizeDatabaseErrorMessage("x".repeat(500));
+  assert.ok(sanitizedLongMessage.length > 0);
+  assert.ok(sanitizedLongMessage.length <= 240);
+  assert.equal(
+    sanitizeDatabaseErrorMessage({ message: "private" }),
+    "Database returned an unrecognized error."
+  );
+});
+
+test("database error sanitizer redacts URL parameters and identifiers", () => {
+  const message = sanitizeDatabaseErrorMessage(
+    "URL ?access_token=access-secret&client_secret=app-secret&code=oauth-code&state=state-secret&user_id=12345; UUID 123e4567-e89b-12d3-a456-426614174000, account 17841400000000002, values 'private-user' and \"private-account\"",
+    [
+      "access-secret",
+      "app-secret",
+      "oauth-code",
+      "state-secret",
+      "private-user",
+      "private-account",
+    ]
+  );
+
+  for (const sensitiveValue of [
+    "access-secret",
+    "app-secret",
+    "oauth-code",
+    "state-secret",
+    "12345",
+    "123e4567-e89b-12d3-a456-426614174000",
+    "17841400000000002",
+    "private-user",
+    "private-account",
+  ]) {
+    assert.equal(message.includes(sensitiveValue), false);
+  }
+  assert.match(message, /access_token=\[redacted\]/);
+  assert.match(message, /client_secret=\[redacted\]/);
+  assert.match(message, /code=\[redacted\]/);
 });
 
 test("code exchange rejects a User token returned by the System User configuration", async () => {
