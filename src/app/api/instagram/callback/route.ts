@@ -1,16 +1,21 @@
+
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { consumeValidOAuthState } from "@/lib/instagram/oauth";
+
 import {
   exchangeMetaCode,
   getAssignedInstagramAccounts,
   getMetaBusinessIdentity,
   getMetaConfig,
   MetaApiError,
+  debugMetaAccessToken,
 } from "@/lib/instagram/meta";
+
 import { encryptToken } from "@/lib/crypto";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { getSiteUrl } from "@/lib/auth/site-url";
+
 import {
   classifyInstagramCallback,
   deduplicateInstagramAccounts,
@@ -22,7 +27,9 @@ function instagramRedirect(status: string, clearState = true) {
   const response = NextResponse.redirect(
     new URL(`/instagram?status=${encodeURIComponent(status)}`, getSiteUrl())
   );
+
   if (clearState) response.cookies.delete(STATE_COOKIE);
+
   return response;
 }
 
@@ -30,7 +37,9 @@ function loginRedirect() {
   const response = NextResponse.redirect(
     new URL("/login?redirectTo=%2Finstagram", getSiteUrl())
   );
+
   response.cookies.delete(STATE_COOKIE);
+
   return response;
 }
 
@@ -55,26 +64,37 @@ async function writeActivityLog(
     error_code: entry.error_code ?? null,
     metadata: entry.metadata ?? {},
   });
+
   if (error) {
-    console.error("[Instagram] Could not write connection activity log.", error.code);
+    console.error(
+      "[Instagram] Could not write connection activity log.",
+      error.code
+    );
   }
 }
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
+
   const cookieStore = await cookies();
   const savedState = cookieStore.get(STATE_COOKIE)?.value;
+
   const receivedState = requestUrl.searchParams.get("state");
   const code = requestUrl.searchParams.get("code");
   const providerError = requestUrl.searchParams.get("error");
+
   const supabase = await createClient();
-  const { data: authData, error: authError } = await supabase.auth.getUser();
+
+  const { data: authData, error: authError } =
+    await supabase.auth.getUser();
+
   if (authError || !authData.user) {
     return loginRedirect();
   }
 
   const config = getMetaConfig();
   const admin = createAdminClient();
+
   const stateConsumed = await consumeValidOAuthState(
     receivedState,
     savedState,
@@ -90,17 +110,23 @@ export async function GET(request: Request) {
           p_expires_at: record.expiresAt,
         }
       );
+
       if (error) {
-        throw new Error("Unable to securely validate the Instagram OAuth state.");
+        throw new Error(
+          "Unable to securely validate the Instagram OAuth state."
+        );
       }
+
       return data === true;
     }
   );
+
   const callback = classifyInstagramCallback(
     stateConsumed,
     providerError,
     code
   );
+
   if (callback.kind === "invalid_state") {
     return instagramRedirect(callback.status);
   }
@@ -110,7 +136,11 @@ export async function GET(request: Request) {
     .select("id")
     .eq("id", authData.user.id)
     .maybeSingle();
-  if (profileError) throw new Error("Unable to validate the application profile.");
+
+  if (profileError) {
+    throw new Error("Unable to validate the application profile.");
+  }
+
   if (!profile) {
     await writeActivityLog(admin, {
       owner_id: authData.user.id,
@@ -119,6 +149,7 @@ export async function GET(request: Request) {
       status: "FAILED",
       error_code: "profile_missing",
     });
+
     return instagramRedirect("profile_missing");
   }
 
@@ -130,8 +161,10 @@ export async function GET(request: Request) {
       status: "FAILED",
       error_code: callback.status,
     });
+
     return instagramRedirect(callback.status);
   }
+
   if (callback.kind === "missing_code") {
     await writeActivityLog(admin, {
       owner_id: authData.user.id,
@@ -140,21 +173,37 @@ export async function GET(request: Request) {
       status: "FAILED",
       error_code: "oauth_code_missing",
     });
+
     return instagramRedirect(callback.status);
   }
 
   try {
+    // Step 1: Exchange OAuth authorization code for an access token.
     const token = await exchangeMetaCode(config, callback.code);
-    const identity = await getMetaBusinessIdentity(config, token.accessToken);
+
+    // Step 2: TEMPORARY diagnostic.
+    // Logs safe token metadata only, never the actual access token.
+    await debugMetaAccessToken(config, token.accessToken);
+
+    // Step 3: Retrieve Meta business identity.
+    const identity = await getMetaBusinessIdentity(
+      config,
+      token.accessToken
+    );
+
+    // Step 4: Retrieve assigned Instagram accounts.
     const accounts = await getAssignedInstagramAccounts(
       config,
       token.accessToken
     );
+
     const uniqueAccounts = deduplicateInstagramAccounts(accounts);
+
     if (uniqueAccounts.length === 0) {
       throw new MetaApiError("meta_accounts_missing");
     }
 
+    // Step 5: Save the connection securely.
     const { error: persistError } = await admin.rpc(
       "persist_instagram_business_connection",
       {
@@ -178,18 +227,32 @@ export async function GET(request: Request) {
         })),
       }
     );
+
     if (persistError) {
-      if (persistError.message === "instagram_account_already_connected") {
+      if (
+        persistError.message ===
+        "instagram_account_already_connected"
+      ) {
         throw new MetaApiError("instagram_account_already_connected");
       }
-      throw new Error("Unable to atomically save the Instagram connection.");
+
+      throw new Error(
+        "Unable to atomically save the Instagram connection."
+      );
     }
 
     return instagramRedirect("connected");
   } catch (error) {
     const failureCode =
-      error instanceof MetaApiError ? error.code : "connection_failed";
-    console.error("[Instagram] OAuth connection failed.", failureCode);
+      error instanceof MetaApiError
+        ? error.code
+        : "connection_failed";
+
+    console.error(
+      "[Instagram] OAuth connection failed.",
+      failureCode
+    );
+
     await writeActivityLog(admin, {
       owner_id: authData.user.id,
       event_type: "INSTAGRAM_CONNECTION_FAILED",
@@ -197,6 +260,7 @@ export async function GET(request: Request) {
       status: "FAILED",
       error_code: failureCode,
     });
+
     return instagramRedirect(
       failureCode === "instagram_account_already_connected"
         ? "account_in_use"

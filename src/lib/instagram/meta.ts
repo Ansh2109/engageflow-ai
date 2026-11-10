@@ -247,6 +247,64 @@ export async function getMetaBusinessIdentity(
     systemUserId: identity.id,
     clientBusinessId: identity.client_business_id,
   };
+
+}
+
+type MetaTokenDebugResponse = {
+  data?: {
+    app_id?: string;
+    type?: string;
+    is_valid?: boolean;
+    user_id?: string;
+    scopes?: string[];
+    expires_at?: number;
+    data_access_expires_at?: number;
+  };
+};
+
+export async function debugMetaAccessToken(
+  config: MetaConfig,
+  inputToken: string
+): Promise<void> {
+  try {
+    const url = graphUrl(config, "debug_token");
+
+    url.searchParams.set("input_token", inputToken);
+    url.searchParams.set(
+      "access_token",
+      `${config.appId}|${config.appSecret}`
+    );
+
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!response.ok) {
+      console.error("[Instagram] Token diagnostic unavailable.", {
+        httpStatus: response.status,
+      });
+      return;
+    }
+
+    const result =
+      (await response.json()) as MetaTokenDebugResponse;
+    const data = result.data;
+
+    console.error("[Instagram] Safe token diagnostics.", {
+      type: data?.type ?? null,
+      isValid: data?.is_valid ?? null,
+      hasUserId: typeof data?.user_id === "string",
+      scopes: data?.scopes ?? [],
+      expiresAt: data?.expires_at ?? null,
+      dataAccessExpiresAt:
+        data?.data_access_expires_at ?? null,
+      appMatches: data?.app_id === config.appId,
+    });
+  } catch {
+    console.error("[Instagram] Token diagnostic request failed.");
+  }
 }
 
 type AssignedAccountsResponse = {
