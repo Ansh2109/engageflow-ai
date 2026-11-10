@@ -9,15 +9,14 @@ import {
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
 export const META_REQUIRED_PERMISSIONS = [
-  "instagram_basic",
-  "instagram_manage_comments",
-  "instagram_manage_messages",
-  "business_management",
+  "instagram_business_basic",
+  "instagram_business_manage_comments",
+  "instagram_business_manage_messages",
+  "instagram_business_content_publish",
 ] as const;
 
 export type MetaOAuthConfig = {
   appId: string;
-  configId: string;
   redirectUri: string;
 };
 
@@ -189,29 +188,32 @@ export function buildMetaAuthorizationUrl(
   config: MetaOAuthConfig,
   state: string
 ): URL {
-  const url = new URL("https://www.facebook.com/dialog/oauth");
+  const url = new URL("https://www.instagram.com/oauth/authorize");
   url.searchParams.set("client_id", config.appId);
-  url.searchParams.set("config_id", config.configId);
   url.searchParams.set("redirect_uri", config.redirectUri);
   url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", META_REQUIRED_PERMISSIONS.join(","));
   url.searchParams.set("state", state);
-  url.searchParams.set("prompt", "login");
+  url.searchParams.set("enable_fb_login", "false");
   return url;
-}
-
-export function createAppSecretProof(
-  accessToken: string,
-  appSecret: string
-): string {
-  return createHmac("sha256", appSecret).update(accessToken).digest("hex");
 }
 
 export function isTokenRefreshDue(
   expiresAt: string | null,
+  lastRefreshedAt?: string | null,
   now = Date.now()
 ): boolean {
   if (!expiresAt) return false;
   const expiry = Date.parse(expiresAt);
+  if (lastRefreshedAt !== undefined) {
+    const refreshedAt = lastRefreshedAt ? Date.parse(lastRefreshedAt) : NaN;
+    if (
+      !Number.isFinite(refreshedAt) ||
+      now - refreshedAt < 24 * 60 * 60 * 1000
+    ) {
+      return false;
+    }
+  }
   return (
     Number.isFinite(expiry) &&
     expiry > now &&

@@ -2,7 +2,11 @@
 
 import { redirect } from "next/navigation";
 import { decryptToken, encryptToken } from "@/lib/crypto";
-import { getMetaConfig, MetaApiError, refreshSystemUserToken } from "@/lib/instagram/meta";
+import {
+  getMetaConfig,
+  MetaApiError,
+  refreshInstagramLongLivedToken,
+} from "@/lib/instagram/meta";
 import { isTokenRefreshDue } from "@/lib/instagram/oauth";
 import {
   isOwnedInstagramAccount,
@@ -90,14 +94,51 @@ export async function refreshInstagramConnection(formData: FormData) {
   const { data: connection, error: lookupError } = await admin
     .from("instagram_business_connections")
     .select(
-      "id, owner_id, client_business_id, system_user_id, encrypted_access_token, token_expires_at"
+      "id, owner_id, login_type, instagram_user_id, encrypted_access_token, token_expires_at, connection_status, updated_at"
     )
     .eq("id", connectionId)
     .eq("owner_id", ownerId)
     .maybeSingle();
   if (lookupError) throw new Error("Unable to load the Instagram connection.");
   if (!connection) redirect("/instagram?status=refresh_failed");
-  if (!isTokenRefreshDue(connection.token_expires_at)) {
+  if (
+    connection.login_type !== "INSTAGRAM_LOGIN" ||
+    !connection.instagram_user_id ||
+    connection.connection_status !== "CONNECTED"
+  ) {
+    redirect("/instagram?status=refresh_failed");
+  }
+
+  if (
+    connection.token_expires_at &&
+    Date.parse(connection.token_expires_at) <= Date.now()
+  ) {
+    const { error: connectionUpdateError } = await admin
+      .from("instagram_business_connections")
+      .update({ connection_status: "EXPIRED" })
+      .eq("id", connection.id)
+      .eq("owner_id", ownerId);
+    if (connectionUpdateError) {
+      throw new Error("Unable to mark the expired Instagram token.");
+    }
+
+    const { error: accountsUpdateError } = await admin
+      .from("instagram_accounts")
+      .update({ connection_status: "EXPIRED" })
+      .eq("connection_id", connection.id)
+      .eq("owner_id", ownerId);
+    if (accountsUpdateError) {
+      throw new Error("Unable to mark the Instagram account as expired.");
+    }
+    redirect("/instagram?status=refresh_failed");
+  }
+
+  if (
+    !isTokenRefreshDue(
+      connection.token_expires_at,
+      connection.updated_at
+    )
+  ) {
     redirect("/instagram?status=refresh_not_due");
   }
 
@@ -108,17 +149,21 @@ export async function refreshInstagramConnection(formData: FormData) {
     .eq("owner_id", ownerId)
     .eq("connection_status", "CONNECTED");
   if (accountsError) throw new Error("Unable to load connected Instagram assets.");
-  if (!accounts.length) redirect("/instagram?status=refresh_failed");
+  if (
+    !accounts.some(
+      (account) => account.instagram_business_id === connection.instagram_user_id
+    )
+  ) {
+    redirect("/instagram?status=refresh_failed");
+  }
 
   try {
     const config = getMetaConfig();
     const currentToken = decryptToken(connection.encrypted_access_token);
-    const refreshedToken = await refreshSystemUserToken(
+    const refreshedToken = await refreshInstagramLongLivedToken(
       config,
       currentToken,
-      connection.client_business_id,
-      connection.system_user_id,
-      accounts.map((account) => account.instagram_business_id)
+      connection.instagram_user_id
     );
     const { error: updateError } = await admin
       .from("instagram_business_connections")
@@ -132,7 +177,26 @@ export async function refreshInstagramConnection(formData: FormData) {
     if (updateError) throw new Error("Unable to securely store the refreshed token.");
   } catch (error) {
     if (error instanceof MetaApiError) {
-      console.error("[Instagram] Business token refresh failed.", error.code);
+      console.error("[Instagram] Instagram token refresh failed.", error.code);
+      if (error.code === "instagram_token_invalid") {
+        const { error: connectionUpdateError } = await admin
+          .from("instagram_business_connections")
+          .update({ connection_status: "REVOKED" })
+          .eq("id", connection.id)
+          .eq("owner_id", ownerId);
+        if (connectionUpdateError) {
+          throw new Error("Unable to mark the revoked Instagram token.");
+        }
+
+        const { error: accountsUpdateError } = await admin
+          .from("instagram_accounts")
+          .update({ connection_status: "REVOKED" })
+          .eq("connection_id", connection.id)
+          .eq("owner_id", ownerId);
+        if (accountsUpdateError) {
+          throw new Error("Unable to mark the Instagram account as revoked.");
+        }
+      }
       redirect("/instagram?status=refresh_failed");
     }
     throw error;

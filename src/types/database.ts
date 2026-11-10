@@ -127,9 +127,11 @@ export interface Database {
         Row: {
           id: string;
           owner_id: string;
-          client_business_id: string;
-          system_user_id: string;
-          config_id: string;
+          login_type: "UNIFIED_LOGIN" | "INSTAGRAM_LOGIN";
+          instagram_user_id: string | null;
+          client_business_id: string | null;
+          system_user_id: string | null;
+          config_id: string | null;
           encrypted_access_token: string;
           token_expires_at: string | null;
           scopes: string[];
@@ -140,9 +142,11 @@ export interface Database {
         Insert: {
           id?: string;
           owner_id: string;
-          client_business_id: string;
-          system_user_id: string;
-          config_id: string;
+          login_type?: "UNIFIED_LOGIN" | "INSTAGRAM_LOGIN";
+          instagram_user_id?: string | null;
+          client_business_id?: string | null;
+          system_user_id?: string | null;
+          config_id?: string | null;
           encrypted_access_token: string;
           token_expires_at?: string | null;
           scopes?: string[];
@@ -153,9 +157,11 @@ export interface Database {
         Update: {
           id?: string;
           owner_id?: string;
-          client_business_id?: string;
-          system_user_id?: string;
-          config_id?: string;
+          login_type?: "UNIFIED_LOGIN" | "INSTAGRAM_LOGIN";
+          instagram_user_id?: string | null;
+          client_business_id?: string | null;
+          system_user_id?: string | null;
+          config_id?: string | null;
           encrypted_access_token?: string;
           token_expires_at?: string | null;
           scopes?: string[];
@@ -525,6 +531,20 @@ export interface Database {
           p_token_expires_at: string | null;
           p_scopes: string[];
           p_accounts: Json;
+        };
+        Returns: string;
+      };
+      persist_instagram_login_connection: {
+        Args: {
+          p_owner_id: string;
+          p_instagram_user_id: string;
+          p_username: string;
+          p_name: string | null;
+          p_profile_picture_url: string | null;
+          p_account_type: AccountType;
+          p_encrypted_access_token: string;
+          p_token_expires_at: string;
+          p_scopes: string[];
         };
         Returns: string;
       };

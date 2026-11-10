@@ -29,11 +29,11 @@ export const instant = false;
 const statusMessages: Record<string, { text: string; success?: boolean }> = {
   connected: { text: "Instagram account connected.", success: true },
   disconnected: {
-    text: "The account was disconnected. A shared business token remains only while another account uses it.",
+    text: "The Instagram account was disconnected.",
     success: true,
   },
   refreshed: {
-    text: "The business access token was refreshed.",
+    text: "The Instagram access token was refreshed.",
     success: true,
   },
   oauth_cancelled: {
@@ -49,10 +49,10 @@ const statusMessages: Record<string, { text: string; success?: boolean }> = {
     text: "Your EngageFlow profile is unavailable. Sign in again or contact support before connecting Instagram.",
   },
   refresh_not_due: {
-    text: "This token is not close to expiring yet.",
+    text: "This token is not eligible for refresh yet. Try again later.",
   },
   refresh_failed: {
-    text: "The token could not be refreshed. Reconnect the business account.",
+    text: "The token could not be refreshed. Reconnect the Instagram account.",
   },
   disconnect_failed: {
     text: "The account could not be disconnected. Please try again.",
@@ -100,7 +100,9 @@ export default async function InstagramPage({
 
   const { data: connections, error: connectionsError } = await admin
     .from("instagram_business_connections")
-    .select("id, token_expires_at, connection_status")
+    .select(
+      "id, login_type, instagram_user_id, token_expires_at, connection_status, updated_at"
+    )
     .eq("owner_id", authData.user.id);
 
   if (connectionsError) {
@@ -212,8 +214,9 @@ export default async function InstagramPage({
             </h2>
 
             <p className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
-              Authorize EngageFlow AI to access the professional Instagram
-              accounts in your business portfolio.
+              Authorize EngageFlow AI directly with your Instagram
+              professional account. A Facebook login or linked Facebook Page
+              is not required.
             </p>
           </div>
         </section>
@@ -225,7 +228,7 @@ export default async function InstagramPage({
       >
         <Instagram className="h-4 w-4" />
         {connectedAccounts.length
-          ? "Connect another business"
+          ? "Connect another Instagram account"
           : "Connect Instagram"}
       </a>
 
@@ -237,23 +240,31 @@ export default async function InstagramPage({
 
         const expiresAt = connectionItem.token_expires_at;
         const expired = isTokenExpired(expiresAt);
-        const refreshDue = isTokenRefreshDue(expiresAt);
+        const isInstagramLogin = connectionItem.login_type === "INSTAGRAM_LOGIN";
+        const refreshDue =
+          isInstagramLogin &&
+          connectionItem.connection_status === "CONNECTED" &&
+          isTokenRefreshDue(expiresAt, connectionItem.updated_at);
 
         return (
           <section
             key={connectionItem.id}
             className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5"
           >
-            <h2 className="font-semibold">Business access</h2>
+            <h2 className="font-semibold">
+              {isInstagramLogin ? "Instagram access" : "Legacy connection"}
+            </h2>
 
             <p className="text-sm text-muted-foreground">
-              {expired
-                ? "This business token has expired. Reconnect the business to restore access."
-                : connectionItem.connection_status === "CONNECTED"
-                  ? expiresAt
-                    ? `Token expires ${new Date(expiresAt).toLocaleDateString()}.`
-                    : "This business token does not have a scheduled expiration."
-                  : "This business connection needs to be reauthorized."}
+              {!isInstagramLogin
+                ? "This existing Unified Login connection is retained. Reconnect the account through Instagram Login to migrate it."
+                : expired || connectionItem.connection_status === "EXPIRED"
+                  ? "This Instagram token has expired. Reconnect the Instagram account to restore access."
+                  : connectionItem.connection_status === "CONNECTED"
+                    ? expiresAt
+                      ? `Token expires ${new Date(expiresAt).toLocaleDateString()}.`
+                      : "This Instagram token has no recorded expiration."
+                    : "This Instagram connection needs to be reauthorized."}
             </p>
 
             {refreshDue && (
@@ -286,29 +297,29 @@ export default async function InstagramPage({
           <li>Instagram Business or Creator accounts are supported.</li>
 
           <li>
-            Meta Unified Login requires the Instagram account to be shared
-            from a business portfolio.
+            Authorization uses Instagram Login directly; a Facebook Page or
+            Business Manager asset assignment is not required.
           </li>
 
           <li>
-            Access tokens are encrypted and retained only on the server. One
-            business token can cover multiple connected accounts.
+            Long-lived Instagram user tokens are encrypted and stored only on
+            the server. Each connected account has its own token.
           </li>
 
           <li>
-            Disconnecting removes EngageFlow&apos;s local access. To revoke
-            the business integration grant itself, also remove EngageFlow in
-            Meta Business Integrations.
+            Disconnecting removes EngageFlow&apos;s local access. Revoke the
+            app&apos;s permissions in Instagram&apos;s Apps and Websites
+            settings to remove the grant itself.
           </li>
         </ul>
 
         <a
-          href="https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-unified-login/"
+          href="https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
         >
-          Meta Unified Login documentation
+          Instagram Login documentation
           <ExternalLink className="h-3 w-3" />
         </a>
       </section>

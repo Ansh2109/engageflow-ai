@@ -18,11 +18,8 @@ export interface Env {
   // Meta / Instagram (Phase 4)
   metaAppId: string;
   metaAppSecret: string;
-  metaConfigId: string;
   metaApiVersion: string;
   metaRedirectUri: string;
-  metaWebhookVerifyToken: string;
-  metaWebhookAppSecret: string;
 
   // Token encryption (Phase 4)
   tokenEncryptionKey: string;
@@ -37,11 +34,8 @@ export function getEnv(): Env {
     siteUrl: process.env.NEXT_PUBLIC_SITE_URL,
     metaAppId: process.env.META_APP_ID,
     metaAppSecret: process.env.META_APP_SECRET,
-    metaConfigId: process.env.META_CONFIG_ID,
     metaApiVersion: process.env.META_API_VERSION ?? "v27.0",
     metaRedirectUri: process.env.META_REDIRECT_URI,
-    metaWebhookVerifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN,
-    metaWebhookAppSecret: process.env.META_WEBHOOK_APP_SECRET,
     tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
   } as const;
 

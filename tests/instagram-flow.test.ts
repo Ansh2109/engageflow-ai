@@ -4,7 +4,6 @@ import test from "node:test";
 import { decryptToken, encryptToken } from "../src/lib/crypto.ts";
 import {
   buildMetaAuthorizationUrl,
-  createAppSecretProof,
   createOAuthState,
   consumeValidOAuthState,
   isTokenExpired,
@@ -20,29 +19,33 @@ import {
   shouldDeleteBusinessConnection,
 } from "../src/lib/instagram/flow.ts";
 import {
+  exchangeMetaCode,
   getMetaConfig,
-  refreshSystemUserToken,
+  refreshInstagramLongLivedToken,
 } from "../src/lib/instagram/meta.ts";
 
-test("OAuth URL uses Unified Login code flow and an exact server callback", () => {
+test("OAuth URL uses direct Instagram Login and hides Facebook Login", () => {
   const url = buildMetaAuthorizationUrl(
     {
       appId: "test-app-id",
-      configId: "test-config",
       redirectUri: "https://engage.example/api/instagram/callback",
     },
     "state-value"
   );
-  assert.equal(url.origin, "https://www.facebook.com");
-  assert.equal(url.pathname, "/dialog/oauth");
+  assert.equal(url.origin, "https://www.instagram.com");
+  assert.equal(url.pathname, "/oauth/authorize");
   assert.equal(url.searchParams.get("client_id"), "test-app-id");
-  assert.equal(url.searchParams.get("config_id"), "test-config");
   assert.equal(
     url.searchParams.get("redirect_uri"),
     "https://engage.example/api/instagram/callback"
   );
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.equal(url.searchParams.get("state"), "state-value");
+  assert.equal(
+    url.searchParams.get("scope"),
+    "instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish"
+  );
+  assert.equal(url.searchParams.get("enable_fb_login"), "false");
 });
 
 test("OAuth state is signed, user-bound, and consumed only once", async () => {
@@ -309,13 +312,6 @@ test("callback rejects invalid state, cancellation, provider errors, and missing
   });
 });
 
-test("Meta app-secret proof is a SHA-256 HMAC of the access token", () => {
-  assert.equal(
-    createAppSecretProof("token-value", "app-secret"),
-    "3decdc49a80347184a48f58815bf90e3e3008571e007091022e7b3a74e75f175"
-  );
-});
-
 test("account ownership rejects cross-tenant conflicts and duplicate account results", () => {
   const accounts = deduplicateInstagramAccounts([
     { id: "100", username: "one" },
@@ -339,16 +335,35 @@ test("shared business connection is deleted only after its last account is remov
 test("token refresh is offered only for a valid expiry within seven days", () => {
   const now = Date.parse("2026-01-01T00:00:00.000Z");
   assert.equal(
-    isTokenRefreshDue("2026-01-06T00:00:00.000Z", now),
+    isTokenRefreshDue("2026-01-06T00:00:00.000Z", undefined, now),
     true
   );
   assert.equal(
-    isTokenRefreshDue("2026-01-10T00:00:00.000Z", now),
+    isTokenRefreshDue("2026-01-10T00:00:00.000Z", undefined, now),
     false
   );
-  assert.equal(isTokenRefreshDue("2025-12-31T23:59:59.000Z", now), false);
-  assert.equal(isTokenRefreshDue("invalid", now), false);
-  assert.equal(isTokenRefreshDue(null, now), false);
+  assert.equal(
+    isTokenRefreshDue("2025-12-31T23:59:59.000Z", undefined, now),
+    false
+  );
+  assert.equal(isTokenRefreshDue("invalid", undefined, now), false);
+  assert.equal(isTokenRefreshDue(null, undefined, now), false);
+  assert.equal(
+    isTokenRefreshDue(
+      "2026-01-06T00:00:00.000Z",
+      new Date(now - 12 * 60 * 60 * 1000).toISOString(),
+      now
+    ),
+    false
+  );
+  assert.equal(
+    isTokenRefreshDue(
+      "2026-01-06T00:00:00.000Z",
+      new Date(now - 25 * 60 * 60 * 1000).toISOString(),
+      now
+    ),
+    true
+  );
   assert.equal(isTokenExpired("2025-12-31T23:59:59.000Z", now), true);
   assert.equal(isTokenExpired("2026-01-02T00:00:00.000Z", now), false);
   assert.equal(isTokenExpired(null, now), false);
@@ -381,12 +396,11 @@ test("access tokens are encrypted and tampering is rejected", () => {
   }
 });
 
-test("business token refresh calls Meta with appsecret_proof and never uses an external host", async () => {
+test("long-lived token refresh validates the account before and after refreshing", async () => {
   const names = [
     "NEXT_PUBLIC_SITE_URL",
     "META_APP_ID",
     "META_APP_SECRET",
-    "META_CONFIG_ID",
     "META_REDIRECT_URI",
     "META_API_VERSION",
   ] as const;
@@ -394,64 +408,178 @@ test("business token refresh calls Meta with appsecret_proof and never uses an e
     names.map((name) => [name, process.env[name]])
   );
   const originalFetch = globalThis.fetch;
-  let capturedUrl: URL | undefined;
-  let capturedMethod: string | undefined;
+  const requests: URL[] = [];
   const startedAt = Date.now();
+  process.env.NEXT_PUBLIC_SITE_URL = "https://engage.example";
+  process.env.META_APP_ID = "1234567890";
+  process.env.META_APP_SECRET = "test-app-secret";
+  process.env.META_REDIRECT_URI =
+    "https://engage.example/api/instagram/callback";
+  process.env.META_API_VERSION = "v27.0";
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    requests.push(url);
+    if (url.pathname.endsWith("/me")) {
+      return Response.json({
+        user_id: "17841400000000001",
+        username: "connected_creator",
+      });
+    }
+    if (url.pathname === "/refresh_access_token") {
+      return Response.json({
+        access_token: "refreshed-token",
+        expires_in: 5_183_944,
+      });
+    }
+    throw new Error(`Unexpected Instagram API request: ${url.pathname}`);
+  };
+
+  try {
+    const token = await refreshInstagramLongLivedToken(
+      getMetaConfig(),
+      "current-token",
+      "17841400000000001"
+    );
+    assert.equal(token.accessToken, "refreshed-token");
+    assert.ok(
+      Date.parse(token.expiresAt) >= startedAt + 5_183_944 * 1000
+    );
+    assert.equal(requests.length, 3);
+    assert.equal(requests[0].origin, "https://graph.instagram.com");
+    assert.equal(requests[1].pathname, "/refresh_access_token");
+    assert.equal(
+      requests[1].searchParams.get("grant_type"),
+      "ig_refresh_token"
+    );
+    assert.equal(
+      requests[1].searchParams.get("access_token"),
+      "current-token"
+    );
+    assert.equal(
+      requests[2].searchParams.get("access_token"),
+      "refreshed-token"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const name of names) {
+      const value = originalValues.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("code exchange validates permissions, upgrades the token, and resolves the authorized account", async () => {
+  const names = [
+    "NEXT_PUBLIC_SITE_URL",
+    "META_APP_ID",
+    "META_APP_SECRET",
+    "META_REDIRECT_URI",
+    "META_API_VERSION",
+  ] as const;
+  const originalValues = new Map(
+    names.map((name) => [name, process.env[name]])
+  );
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: URL; method: string; body: BodyInit | null }> =
+    [];
+  const startedAt = Date.now();
+  const permissions =
+    "instagram_business_basic,instagram_business_manage_comments," +
+    "instagram_business_manage_messages,instagram_business_content_publish";
 
   process.env.NEXT_PUBLIC_SITE_URL = "https://engage.example";
-  process.env.META_APP_ID = "test-app-id";
+  process.env.META_APP_ID = "1234567890";
   process.env.META_APP_SECRET = "test-app-secret";
-  process.env.META_CONFIG_ID = "test-config-id";
   process.env.META_REDIRECT_URI =
     "https://engage.example/api/instagram/callback";
   process.env.META_API_VERSION = "v27.0";
   globalThis.fetch = async (input, init) => {
-    capturedUrl = new URL(input.toString());
-    capturedMethod = init?.method;
-    return new Response(JSON.stringify({ access_token: "rotated-token" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    const url = new URL(input.toString());
+    const method = init?.method ?? "GET";
+    const body = init?.body ?? null;
+    requests.push({ url, method, body });
+
+    if (url.origin === "https://api.instagram.com") {
+      return Response.json({
+        data: [
+          {
+            access_token: "short-lived-token",
+            user_id: "17841400000000002",
+            permissions,
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/access_token") {
+      return Response.json({
+        access_token: "long-lived-token",
+        token_type: "bearer",
+        expires_in: 5_183_944,
+      });
+    }
+    if (url.pathname === "/v27.0/me") {
+      return Response.json({
+        user_id: "17841400000000001",
+        username: "connected_creator",
+        name: "Creator",
+        profile_picture_url: "https://example.test/profile.jpg",
+        account_type: "MEDIA_CREATOR",
+      });
+    }
+    throw new Error(`Unexpected Instagram API request: ${url.origin}${url.pathname}`);
   };
 
   try {
     const config = getMetaConfig();
-    const token = await refreshSystemUserToken(
-      config,
-      "current-token",
-      "123",
-      "456",
-      ["789"]
-    );
-    assert.equal(token.accessToken, "rotated-token");
+    const token = await exchangeMetaCode(config, "one-time-code");
+    assert.equal(token.accessToken, "long-lived-token");
+    assert.equal(token.account.id, "17841400000000001");
+    assert.equal(token.account.username, "connected_creator");
+    assert.equal(token.account.accountType, "CREATOR");
+    assert.deepEqual(token.scopes, permissions.split(","));
     const expiry = Date.parse(token.expiresAt);
-    assert.ok(expiry >= startedAt + 60 * 24 * 60 * 60 * 1000);
-    assert.ok(expiry <= Date.now() + 60 * 24 * 60 * 60 * 1000);
-    assert.equal(capturedMethod, "POST");
+    assert.ok(expiry >= startedAt + 5_183_944 * 1000);
+    assert.ok(expiry <= Date.now() + 5_183_944 * 1000);
+    assert.equal(requests.length, 3);
+    assert.equal(requests[0].method, "POST");
     assert.equal(
-      capturedUrl?.origin,
-      "https://graph.facebook.com"
+      requests[0].url.origin,
+      "https://api.instagram.com"
     );
     assert.equal(
-      capturedUrl?.pathname,
-      "/v27.0/123/system_user_access_tokens"
+      requests[0].url.pathname,
+      "/oauth/access_token"
+    );
+    assert.ok(requests[0].body instanceof FormData);
+    const codeExchangeBody = requests[0].body as FormData;
+    assert.equal(codeExchangeBody.get("code"), "one-time-code");
+    assert.equal(codeExchangeBody.get("grant_type"), "authorization_code");
+    assert.equal(
+      codeExchangeBody.get("redirect_uri"),
+      "https://engage.example/api/instagram/callback"
     );
     assert.equal(
-      capturedUrl?.searchParams.get("appsecret_proof"),
-      createAppSecretProof("current-token", "test-app-secret")
+      requests[1].url.origin,
+      "https://graph.instagram.com"
+    );
+    assert.equal(requests[1].url.pathname, "/access_token");
+    assert.equal(
+      requests[1].url.searchParams.get("grant_type"),
+      "ig_exchange_token"
     );
     assert.equal(
-      capturedUrl?.searchParams.get("system_user_id"),
-      "456"
-    );
-    assert.equal(capturedUrl?.searchParams.get("asset"), "789");
-    assert.equal(
-      capturedUrl?.searchParams.get("scope"),
-      "instagram_basic,instagram_manage_comments,instagram_manage_messages,business_management"
+      requests[1].url.searchParams.get("access_token"),
+      "short-lived-token"
     );
     assert.equal(
-      capturedUrl?.searchParams.get("set_token_expires_in_60_days"),
-      "true"
+      requests[2].url.origin,
+      "https://graph.instagram.com"
+    );
+    assert.equal(
+      requests[2].url.searchParams.get("access_token"),
+      "long-lived-token"
     );
   } finally {
     globalThis.fetch = originalFetch;

@@ -5,11 +5,8 @@ import { consumeValidOAuthState } from "@/lib/instagram/oauth";
 
 import {
   exchangeMetaCode,
-  getAssignedInstagramAccounts,
-  getMetaBusinessIdentity,
   getMetaConfig,
   MetaApiError,
-  debugMetaAccessToken,
 } from "@/lib/instagram/meta";
 
 import { encryptToken } from "@/lib/crypto";
@@ -18,10 +15,27 @@ import { getSiteUrl } from "@/lib/auth/site-url";
 
 import {
   classifyInstagramCallback,
-  deduplicateInstagramAccounts,
 } from "@/lib/instagram/flow";
 
 const STATE_COOKIE = "instagram_oauth_state";
+
+function getCallbackParameter(
+  requestUrl: URL,
+  name: string,
+  maxLength: number
+): string | null {
+  const values = requestUrl.searchParams.getAll(name);
+  if (values.length !== 1) return null;
+  const value = values[0];
+  if (
+    !value ||
+    value.length > maxLength ||
+    /[\u0000-\u001f]/.test(value)
+  ) {
+    return null;
+  }
+  return value;
+}
 
 function instagramRedirect(status: string, clearState = true) {
   const response = NextResponse.redirect(
@@ -79,9 +93,11 @@ export async function GET(request: Request) {
   const cookieStore = await cookies();
   const savedState = cookieStore.get(STATE_COOKIE)?.value;
 
-  const receivedState = requestUrl.searchParams.get("state");
-  const code = requestUrl.searchParams.get("code");
-  const providerError = requestUrl.searchParams.get("error");
+  const receivedState = getCallbackParameter(requestUrl, "state", 4096);
+  const code = getCallbackParameter(requestUrl, "code", 2048);
+  const providerError = getCallbackParameter(requestUrl, "error", 128);
+  const invalidProviderError =
+    requestUrl.searchParams.has("error") && providerError === null;
 
   const supabase = await createClient();
 
@@ -123,7 +139,7 @@ export async function GET(request: Request) {
 
   const callback = classifyInstagramCallback(
     stateConsumed,
-    providerError,
+    invalidProviderError ? "invalid_request" : providerError,
     code
   );
 
@@ -178,54 +194,21 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Step 1: Exchange OAuth authorization code for an access token.
+    // Exchange the code, extend the token, and resolve the authorized account.
     const token = await exchangeMetaCode(config, callback.code);
 
-const systemUserId = await debugMetaAccessToken(
-  config,
-  token.accessToken
-);
-
-const identity = await getMetaBusinessIdentity(
-  config,
-  token.accessToken,
-  systemUserId
-);
-
-    // Step 4: Retrieve assigned Instagram accounts.
-    const accounts = await getAssignedInstagramAccounts(
-      config,
-      token.accessToken
-    );
-
-    const uniqueAccounts = deduplicateInstagramAccounts(accounts);
-
-    if (uniqueAccounts.length === 0) {
-      throw new MetaApiError("meta_accounts_missing");
-    }
-
-    // Step 5: Save the connection securely.
     const { error: persistError } = await admin.rpc(
-      "persist_instagram_business_connection",
+      "persist_instagram_login_connection",
       {
         p_owner_id: authData.user.id,
-        p_client_business_id: identity.clientBusinessId,
-        p_system_user_id: identity.systemUserId,
-        p_config_id: config.configId,
+        p_instagram_user_id: token.account.id,
+        p_username: token.account.username,
+        p_name: token.account.name,
+        p_profile_picture_url: token.account.profilePictureUrl,
+        p_account_type: token.account.accountType,
         p_encrypted_access_token: encryptToken(token.accessToken),
         p_token_expires_at: token.expiresAt,
-        p_scopes: [
-          "instagram_basic",
-          "instagram_manage_comments",
-          "instagram_manage_messages",
-          "business_management",
-        ],
-        p_accounts: uniqueAccounts.map((account) => ({
-          id: account.id,
-          username: account.username,
-          name: account.name,
-          profile_picture_url: account.profilePictureUrl,
-        })),
+        p_scopes: token.scopes,
       }
     );
 
