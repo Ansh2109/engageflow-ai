@@ -22,6 +22,7 @@ import {
 import {
   exchangeMetaCode,
   getMetaConfig,
+  MetaApiError,
   refreshInstagramLongLivedToken,
   refreshSystemUserToken,
 } from "../src/lib/instagram/meta.ts";
@@ -594,6 +595,170 @@ test("code exchange validates the System User token, scopes, identity, and assig
     );
   } finally {
     globalThis.fetch = originalFetch;
+    for (const name of names) {
+      const value = originalValues.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("permission diagnostics distinguish missing token scopes and denied permission rows", async () => {
+  const names = [
+    "NEXT_PUBLIC_SITE_URL",
+    "META_APP_ID",
+    "META_APP_SECRET",
+    "META_CONFIG_ID",
+    "META_REDIRECT_URI",
+    "META_API_VERSION",
+  ] as const;
+  const originalValues = new Map(
+    names.map((name) => [name, process.env[name]])
+  );
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const originalInfo = console.info;
+  const diagnostics: Array<{
+    level: "warn" | "info";
+    message: unknown;
+    details: unknown;
+  }> = [];
+  const permissions = [
+    "instagram_basic",
+    "instagram_manage_comments",
+    "instagram_manage_messages",
+    "instagram_content_publish",
+    "business_management",
+  ];
+  let scopes = permissions;
+  let permissionsPayload: unknown = {
+    data: permissions.map((permission) => ({
+      permission,
+      status: "granted",
+    })),
+  };
+
+  process.env.NEXT_PUBLIC_SITE_URL = "https://engage.example";
+  process.env.META_APP_ID = "1234567890";
+  process.env.META_APP_SECRET = "test-app-secret";
+  process.env.META_CONFIG_ID = "9876543210";
+  process.env.META_REDIRECT_URI =
+    "https://engage.example/api/instagram/callback";
+  process.env.META_API_VERSION = "v27.0";
+  console.warn = (...args: Parameters<typeof console.warn>) => {
+    diagnostics.push({ level: "warn", message: args[0], details: args[1] });
+  };
+  console.info = (...args: Parameters<typeof console.info>) => {
+    diagnostics.push({ level: "info", message: args[0], details: args[1] });
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    if (url.pathname === "/v27.0/oauth/access_token") {
+      return Response.json({ access_token: "test-system-user-token" });
+    }
+    if (url.pathname === "/v27.0/debug_token") {
+      return Response.json({
+        data: {
+          app_id: "1234567890",
+          type: "SYSTEM_USER",
+          is_valid: true,
+          user_id: "10000000001",
+          scopes,
+          expires_at: Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60,
+        },
+      });
+    }
+    if (url.pathname === "/v27.0/me") {
+      return Response.json({ client_business_id: "20000000002" });
+    }
+    if (url.pathname === "/v27.0/10000000001/permissions") {
+      return Response.json(permissionsPayload);
+    }
+    throw new Error(`Unexpected Meta request: ${url.pathname}`);
+  };
+
+  try {
+    const config = getMetaConfig();
+    scopes = permissions.filter(
+      (permission) => permission !== "business_management"
+    );
+    await assert.rejects(
+      exchangeMetaCode(config, "test-authorization-code"),
+      (error: unknown) =>
+        error instanceof MetaApiError &&
+        error.code === "meta_permissions_missing"
+    );
+    assert.ok(
+      diagnostics.some(
+        ({ level, details }) =>
+          level === "warn" &&
+          JSON.stringify(details).includes('"stage":"debug_token_scopes"') &&
+          JSON.stringify(details).includes("business_management")
+      )
+    );
+
+    scopes = permissions;
+    permissionsPayload = {
+      data: permissions.map((permission) => ({
+        permission,
+        status:
+          permission === "instagram_manage_messages" ? "declined" : "granted",
+      })),
+    };
+    await assert.rejects(
+      exchangeMetaCode(config, "test-authorization-code"),
+      (error: unknown) =>
+        error instanceof MetaApiError &&
+        error.code === "meta_permissions_missing"
+    );
+    assert.ok(
+      diagnostics.some(
+        ({ level, details }) =>
+          level === "warn" &&
+          JSON.stringify(details).includes(
+            '"stage":"system_user_permissions"'
+          ) &&
+          JSON.stringify(details).includes("instagram_manage_messages")
+      )
+    );
+    assert.ok(
+      diagnostics.some(
+        ({ level, details }) =>
+          level === "info" &&
+          JSON.stringify(details).includes('"status":"declined"')
+      )
+    );
+
+    permissionsPayload = {
+      data: [{ permission: "instagram_basic" }],
+    };
+    await assert.rejects(
+      exchangeMetaCode(config, "test-authorization-code"),
+      (error: unknown) =>
+        error instanceof MetaApiError &&
+        error.code === "meta_permissions_invalid"
+    );
+    assert.ok(
+      diagnostics.some(
+        ({ level, details }) =>
+          level === "warn" &&
+          JSON.stringify(details).includes(
+            '"stage":"system_user_permissions_response"'
+          )
+      )
+    );
+
+    const serializedDiagnostics = JSON.stringify(diagnostics);
+    assert.equal(serializedDiagnostics.includes("test-system-user-token"), false);
+    assert.equal(serializedDiagnostics.includes("test-app-secret"), false);
+    assert.equal(
+      serializedDiagnostics.includes("test-authorization-code"),
+      false
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+    console.info = originalInfo;
     for (const name of names) {
       const value = originalValues.get(name);
       if (value === undefined) delete process.env[name];

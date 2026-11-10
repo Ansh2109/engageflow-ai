@@ -47,6 +47,11 @@ type MetaTokenDebugInfo = {
   expiresAt: string | null;
 };
 
+type MetaPermission = {
+  permission: string;
+  status: string;
+};
+
 type GraphRequestOptions = {
   method?: "GET" | "POST";
   params?: Record<string, string>;
@@ -168,10 +173,33 @@ function tokenExpiry(expiresAt: unknown): string | null {
   return new Date(expiresAt * 1000).toISOString();
 }
 
-function hasRequiredPermissions(scopes: string[]): boolean {
-  return META_REQUIRED_PERMISSIONS.every((permission) =>
-    scopes.includes(permission)
+function getMissingPermissions(granted: Iterable<string>): string[] {
+  const grantedSet = new Set(granted);
+  return META_REQUIRED_PERMISSIONS.filter(
+    (permission) => !grantedSet.has(permission)
   );
+}
+
+function logPermissionValidationFailure(
+  stage: string,
+  details: Record<string, unknown>
+): void {
+  console.warn("[Instagram] Permission validation failed.", {
+    stage,
+    ...details,
+  });
+}
+
+function summarizePermissions(permissions: MetaPermission[]) {
+  return permissions.slice(0, 100).map(({ permission, status }) => ({
+    permission: /^[a-zA-Z0-9_.:-]{1,128}$/.test(permission)
+      ? permission
+      : "[invalid]",
+    status:
+      status === "granted" || status === "declined" || status === "expired"
+        ? status
+        : "[unknown]",
+  }));
 }
 
 export async function debugMetaAccessToken(
@@ -217,11 +245,20 @@ export async function debugMetaAccessToken(
     !Array.isArray(scopes) ||
     !scopes.every((scope) => typeof scope === "string")
   ) {
+    logPermissionValidationFailure("debug_token_metadata", {
+      reason: "invalid_token_metadata_or_scopes_shape",
+    });
     throw new MetaApiError("meta_system_user_token_invalid");
   }
 
   const normalizedScopes = scopes as string[];
-  if (!hasRequiredPermissions(normalizedScopes)) {
+  const missingPermissions = getMissingPermissions(normalizedScopes);
+  if (missingPermissions.length > 0) {
+    logPermissionValidationFailure("debug_token_scopes", {
+      missingPermissions,
+      returnedPermissions: normalizedScopes.slice(0, 100),
+      omittedPermissionCount: Math.max(0, normalizedScopes.length - 100),
+    });
     throw new MetaApiError("meta_permissions_missing");
   }
 
@@ -249,26 +286,65 @@ async function getMetaBusinessIdentity(
     throw new MetaApiError("meta_business_identity_missing");
   }
 
-  const permissionsPayload = await requestJson(
-    config,
-    `${systemUserId}/permissions`,
-    accessToken
-  );
+  let permissionsPayload: unknown;
+  try {
+    permissionsPayload = await requestJson(
+      config,
+      `${systemUserId}/permissions`,
+      accessToken
+    );
+  } catch (error) {
+    logPermissionValidationFailure("system_user_permissions_request", {
+      errorCode:
+        error instanceof MetaApiError ? error.code : "unexpected_error",
+    });
+    throw error;
+  }
+
   const permissionRows = asRecord(permissionsPayload)?.data;
   if (!Array.isArray(permissionRows)) {
+    logPermissionValidationFailure("system_user_permissions_response", {
+      reason: "data_is_not_an_array",
+    });
     throw new MetaApiError("meta_permissions_invalid");
   }
 
-  const granted = new Set(
-    permissionRows.flatMap((row) => {
-      const permission = asRecord(row);
-      return permission?.status === "granted" &&
-        typeof permission.permission === "string"
-        ? [permission.permission]
-        : [];
-    })
-  );
-  if (!META_REQUIRED_PERMISSIONS.every((permission) => granted.has(permission))) {
+  const permissions: MetaPermission[] = [];
+  for (const row of permissionRows) {
+    const permission = asRecord(row);
+    if (
+      typeof permission?.permission !== "string" ||
+      typeof permission.status !== "string"
+    ) {
+      logPermissionValidationFailure("system_user_permissions_response", {
+        reason: "invalid_permission_row",
+        validPermissionRows: summarizePermissions(permissions),
+      });
+      throw new MetaApiError("meta_permissions_invalid");
+    }
+    permissions.push({
+      permission: permission.permission,
+      status: permission.status,
+    });
+  }
+
+  const permissionSummary = summarizePermissions(permissions);
+  console.info("[Instagram] Meta permission response.", {
+    stage: "system_user_permissions",
+    permissions: permissionSummary,
+    omittedPermissionCount: Math.max(0, permissions.length - 100),
+  });
+
+  const granted = permissions
+    .filter(({ status }) => status === "granted")
+    .map(({ permission }) => permission);
+  const missingPermissions = getMissingPermissions(granted);
+  if (missingPermissions.length > 0) {
+    logPermissionValidationFailure("system_user_permissions", {
+      missingPermissions,
+      permissions: permissionSummary,
+      omittedPermissionCount: Math.max(0, permissions.length - 100),
+    });
     throw new MetaApiError("meta_permissions_missing");
   }
 
