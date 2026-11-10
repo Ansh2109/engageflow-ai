@@ -181,15 +181,16 @@ export async function GET(request: Request) {
     // Step 1: Exchange OAuth authorization code for an access token.
     const token = await exchangeMetaCode(config, callback.code);
 
-    // Step 2: TEMPORARY diagnostic.
-    // Logs safe token metadata only, never the actual access token.
-    await debugMetaAccessToken(config, token.accessToken);
+const systemUserId = await debugMetaAccessToken(
+  config,
+  token.accessToken
+);
 
-    // Step 3: Retrieve Meta business identity.
-    const identity = await getMetaBusinessIdentity(
-      config,
-      token.accessToken
-    );
+const identity = await getMetaBusinessIdentity(
+  config,
+  token.accessToken,
+  systemUserId
+);
 
     // Step 4: Retrieve assigned Instagram accounts.
     const accounts = await getAssignedInstagramAccounts(
