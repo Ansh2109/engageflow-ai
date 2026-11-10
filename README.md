@@ -64,11 +64,10 @@ In Meta's App Dashboard:
    the server-side environment variables above. Never use an Instagram App ID
    from the standalone Instagram Login setup.
 4. Configure and request `instagram_basic`, `instagram_manage_comments`,
-   `instagram_manage_messages`, and `instagram_content_publish`. Also grant
-   `business_management` because the configured System User token refresh
-   operation uses Meta's System User access-token management endpoint, which
-   requires that permission. The app validates granted permissions from Meta's
-   token and permissions responses before persisting a connection.
+   `instagram_manage_messages`, and `instagram_content_publish`. These are the
+   permissions required to connect an account. The app validates granted
+   permissions from Meta's token and permissions responses before persisting a
+   connection.
 5. Assign the Instagram professional accounts to the configured System User.
    The app discovers only Instagram accounts assigned to that System User.
 6. For customers outside the app's roles/testers, request the required
@@ -92,9 +91,15 @@ OAuth state, callback parameters, the returned token's `SYSTEM_USER` type, app
 identity, business identity, granted scopes, and assigned Instagram assets.
 It exchanges the authorization code at Meta's Graph OAuth endpoint, encrypts
 the System User token with AES-256-GCM, and stores it with its business and
-System User IDs. The dashboard refresh action validates and renews expiring
-System User tokens only when due. Tokens, authorization codes, and secrets are
-never sent to browser code or written to application logs.
+System User IDs. Unified Login System User tokens are not automatically
+refreshed: renewing them through
+Meta's Business System User access-token endpoint is part of the Business
+Manager API and may require the separate `business_management` permission.
+The app avoids that endpoint rather than requesting an extra permission. When
+a token expires, the customer can reconnect; that action marks the connection
+and its accounts as expired before starting OAuth. Valid, unexpired tokens are
+left untouched. Tokens, authorization codes, and secrets are never sent to
+browser code or written to application logs.
 
 Before using this integration, apply these additive migrations in order to the
 intended database:
@@ -104,10 +109,12 @@ intended database:
 3. `supabase/migrations/20261110000003_instagram_oauth_state.sql`
 4. `supabase/migrations/20261110000004_instagram_login_connections.sql`
 5. `supabase/migrations/20261110000005_instagram_unified_login.sql`
+6. `supabase/migrations/20261111000001_unified_login_permissions.sql`
 
 The fifth migration adds a separate table, account relationship, and
-service-role-only RPC for the Unified Login System User token flow. It only
-adds a nullable account-link column and does not drop or rewrite any existing
+service-role-only RPC for the Unified Login System User token flow. The sixth
+migration replaces that RPC's scope validation with the four Instagram
+permissions required for connection; it does not drop or rewrite existing
 columns, connections, or token records.
 Existing legacy and direct Instagram Login connections remain in their
 original table; when an account is reconnected through Unified Login, only its

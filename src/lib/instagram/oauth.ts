@@ -13,7 +13,6 @@ export const META_REQUIRED_PERMISSIONS = [
   "instagram_manage_comments",
   "instagram_manage_messages",
   "instagram_content_publish",
-  "business_management",
 ] as const;
 
 export type MetaOAuthConfig = {

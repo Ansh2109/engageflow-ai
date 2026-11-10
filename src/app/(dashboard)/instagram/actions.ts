@@ -6,7 +6,6 @@ import {
   getMetaConfig,
   MetaApiError,
   refreshInstagramLongLivedToken,
-  refreshSystemUserToken,
 } from "@/lib/instagram/meta";
 import { isTokenRefreshDue } from "@/lib/instagram/oauth";
 import {
@@ -229,7 +228,7 @@ export async function refreshInstagramConnection(formData: FormData) {
   redirect("/instagram?status=refreshed");
 }
 
-export async function refreshUnifiedLoginConnection(formData: FormData) {
+export async function reconnectUnifiedLoginConnection(formData: FormData) {
   const ownerId = await getOwnerId();
   const connectionId = formData.get("connectionId");
   if (typeof connectionId !== "string" || !UUID_PATTERN.test(connectionId)) {
@@ -246,21 +245,27 @@ export async function refreshUnifiedLoginConnection(formData: FormData) {
     .eq("owner_id", ownerId)
     .maybeSingle();
   if (lookupError) throw new Error("Unable to load the Unified Login connection.");
-  if (!connection || connection.connection_status !== "CONNECTED") {
+  if (!connection) {
     redirect("/instagram?status=refresh_failed");
   }
 
-  if (
-    connection.token_expires_at &&
-    Date.parse(connection.token_expires_at) <= Date.now()
-  ) {
-    const { error: connectionUpdateError } = await admin
-      .from("instagram_unified_login_connections")
-      .update({ connection_status: "EXPIRED" })
-      .eq("id", connection.id)
-      .eq("owner_id", ownerId);
-    if (connectionUpdateError) {
-      throw new Error("Unable to mark the expired Unified Login token.");
+  const isExpired =
+    connection.token_expires_at !== null &&
+    Date.parse(connection.token_expires_at) <= Date.now();
+  if (connection.connection_status === "CONNECTED" && !isExpired) {
+    redirect("/instagram?status=reauthorize_not_due");
+  }
+
+  if (isExpired && connection.connection_status !== "REVOKED") {
+    if (connection.connection_status === "CONNECTED") {
+      const { error: connectionUpdateError } = await admin
+        .from("instagram_unified_login_connections")
+        .update({ connection_status: "EXPIRED" })
+        .eq("id", connection.id)
+        .eq("owner_id", ownerId);
+      if (connectionUpdateError) {
+        throw new Error("Unable to mark the expired Unified Login token.");
+      }
     }
 
     const { error: accountsUpdateError } = await admin
@@ -271,72 +276,7 @@ export async function refreshUnifiedLoginConnection(formData: FormData) {
     if (accountsUpdateError) {
       throw new Error("Unable to mark the Unified Login accounts as expired.");
     }
-    redirect("/instagram?status=refresh_failed");
   }
 
-  if (!isTokenRefreshDue(connection.token_expires_at, connection.updated_at)) {
-    redirect("/instagram?status=refresh_not_due");
-  }
-
-  const { data: accounts, error: accountsError } = await admin
-    .from("instagram_accounts")
-    .select("instagram_business_id")
-    .eq("unified_connection_id", connection.id)
-    .eq("owner_id", ownerId)
-    .eq("connection_status", "CONNECTED");
-  if (accountsError) throw new Error("Unable to load assigned Instagram assets.");
-  if (accounts.length === 0) redirect("/instagram?status=refresh_failed");
-
-  try {
-    const config = getMetaConfig();
-    const refreshedToken = await refreshSystemUserToken(
-      config,
-      decryptToken(connection.encrypted_access_token),
-      connection.client_business_id,
-      connection.system_user_id,
-      accounts.map((account) => account.instagram_business_id)
-    );
-    const { error: updateError } = await admin
-      .from("instagram_unified_login_connections")
-      .update({
-        encrypted_access_token: encryptToken(refreshedToken.accessToken),
-        token_expires_at: refreshedToken.expiresAt,
-        connection_status: "CONNECTED",
-      })
-      .eq("id", connection.id)
-      .eq("owner_id", ownerId);
-    if (updateError) {
-      throw new Error("Unable to securely store the refreshed System User token.");
-    }
-  } catch (error) {
-    if (error instanceof MetaApiError) {
-      console.error("[Instagram] Unified Login token refresh failed.", error.code);
-      if (
-        error.code === "meta_token_invalid" ||
-        error.code === "meta_system_user_token_invalid"
-      ) {
-        const { error: connectionUpdateError } = await admin
-          .from("instagram_unified_login_connections")
-          .update({ connection_status: "REVOKED" })
-          .eq("id", connection.id)
-          .eq("owner_id", ownerId);
-        if (connectionUpdateError) {
-          throw new Error("Unable to mark the Unified Login token as revoked.");
-        }
-
-        const { error: accountsUpdateError } = await admin
-          .from("instagram_accounts")
-          .update({ connection_status: "REVOKED" })
-          .eq("unified_connection_id", connection.id)
-          .eq("owner_id", ownerId);
-        if (accountsUpdateError) {
-          throw new Error("Unable to mark the Unified Login accounts as revoked.");
-        }
-      }
-      redirect("/instagram?status=refresh_failed");
-    }
-    throw error;
-  }
-
-  redirect("/instagram?status=refreshed");
+  redirect("/api/instagram/connect");
 }

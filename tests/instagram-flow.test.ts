@@ -24,7 +24,6 @@ import {
   getMetaConfig,
   MetaApiError,
   refreshInstagramLongLivedToken,
-  refreshSystemUserToken,
 } from "../src/lib/instagram/meta.ts";
 
 test("OAuth URL invokes the configured Facebook Login for Business flow", () => {
@@ -494,7 +493,6 @@ test("code exchange validates the System User token, scopes, identity, and assig
     "instagram_manage_comments",
     "instagram_manage_messages",
     "instagram_content_publish",
-    "business_management",
   ];
 
   process.env.NEXT_PUBLIC_SITE_URL = "https://engage.example";
@@ -628,7 +626,6 @@ test("permission diagnostics distinguish missing token scopes and denied permiss
     "instagram_manage_comments",
     "instagram_manage_messages",
     "instagram_content_publish",
-    "business_management",
   ];
   let scopes = permissions;
   let permissionsPayload: unknown = {
@@ -680,7 +677,7 @@ test("permission diagnostics distinguish missing token scopes and denied permiss
   try {
     const config = getMetaConfig();
     scopes = permissions.filter(
-      (permission) => permission !== "business_management"
+      (permission) => permission !== "instagram_content_publish"
     );
     await assert.rejects(
       exchangeMetaCode(config, "test-authorization-code"),
@@ -693,7 +690,7 @@ test("permission diagnostics distinguish missing token scopes and denied permiss
         ({ level, details }) =>
           level === "warn" &&
           JSON.stringify(details).includes('"stage":"debug_token_scopes"') &&
-          JSON.stringify(details).includes("business_management")
+          JSON.stringify(details).includes("instagram_content_publish")
       )
     );
 
@@ -824,129 +821,31 @@ test("code exchange rejects a User token returned by the System User configurati
   }
 });
 
-test("System User refresh uses the business token endpoint and revalidates the token", async () => {
-  const names = [
-    "NEXT_PUBLIC_SITE_URL",
-    "META_APP_ID",
-    "META_APP_SECRET",
-    "META_CONFIG_ID",
-    "META_REDIRECT_URI",
-    "META_API_VERSION",
-  ] as const;
-  const originalValues = new Map(
-    names.map((name) => [name, process.env[name]])
+test("Unified Login tokens are not refreshed and only expired tokens require reconnection", () => {
+  const meta = readFileSync(
+    new URL("../src/lib/instagram/meta.ts", import.meta.url),
+    "utf8"
   );
-  const originalFetch = globalThis.fetch;
-  const requests: Array<{ url: URL; method: string }> = [];
-  const permissions = [
-    "instagram_basic",
-    "instagram_manage_comments",
-    "instagram_manage_messages",
-    "instagram_content_publish",
-    "business_management",
-  ];
-  process.env.NEXT_PUBLIC_SITE_URL = "https://engage.example";
-  process.env.META_APP_ID = "1234567890";
-  process.env.META_APP_SECRET = "test-app-secret";
-  process.env.META_CONFIG_ID = "9876543210";
-  process.env.META_REDIRECT_URI =
-    "https://engage.example/api/instagram/callback";
-  process.env.META_API_VERSION = "v27.0";
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(input.toString());
-    const method = init?.method ?? "GET";
-    requests.push({ url, method });
-    if (url.pathname === "/v27.0/debug_token") {
-      const inputToken = url.searchParams.get("input_token");
-      return Response.json({
-        data: {
-          app_id: "1234567890",
-          type: "SYSTEM_USER",
-          is_valid: true,
-          user_id: "10000000001",
-          scopes: permissions,
-          expires_at:
-            Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60,
-          inputToken,
-        },
-      });
-    }
-    if (url.pathname === "/v27.0/me") {
-      return Response.json({ client_business_id: "20000000002" });
-    }
-    if (url.pathname === "/v27.0/10000000001/permissions") {
-      return Response.json({
-        data: permissions.map((permission) => ({
-          permission,
-          status: "granted",
-        })),
-      });
-    }
-    if (
-      url.pathname ===
-      "/v27.0/10000000001/assigned_instagram_accounts"
-    ) {
-      return Response.json({
-        data: [
-          {
-            id: "17841400000000002",
-            username: "connected_creator",
-          },
-        ],
-      });
-    }
-    if (
-      url.pathname ===
-      "/v27.0/20000000002/system_user_access_tokens" &&
-      method === "POST"
-    ) {
-      return Response.json({ access_token: "refreshed-system-user-token" });
-    }
-    throw new Error(`Unexpected Meta request: ${url.pathname}`);
-  };
+  const actions = readFileSync(
+    new URL("../src/app/(dashboard)/instagram/actions.ts", import.meta.url),
+    "utf8"
+  );
 
-  try {
-    const refreshed = await refreshSystemUserToken(
-      getMetaConfig(),
-      "current-system-user-token",
-      "20000000002",
-      "10000000001",
-      ["17841400000000002"]
-    );
-    assert.equal(refreshed.accessToken, "refreshed-system-user-token");
-    assert.ok(Date.parse(refreshed.expiresAt ?? "") > Date.now());
-
-    const refreshRequest = requests.find(
-      ({ url }) =>
-        url.pathname === "/v27.0/20000000002/system_user_access_tokens"
-    );
-    assert.ok(refreshRequest);
-    assert.equal(refreshRequest.method, "POST");
-    assert.equal(
-      refreshRequest.url.searchParams.get("system_user_id"),
-      "10000000001"
-    );
-    assert.equal(
-      refreshRequest.url.searchParams.get("asset"),
-      "17841400000000002"
-    );
-    assert.equal(
-      refreshRequest.url.searchParams.get("set_token_expires_in_60_days"),
-      "true"
-    );
-    assert.equal(
-      refreshRequest.url.searchParams.get("appsecret_proof")?.length,
-      64
-    );
-    assert.equal(requests.length, 9);
-  } finally {
-    globalThis.fetch = originalFetch;
-    for (const name of names) {
-      const value = originalValues.get(name);
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
+  assert.doesNotMatch(meta, /system_user_access_tokens|refreshSystemUserToken/);
+  assert.doesNotMatch(actions, /refreshUnifiedLoginConnection|refreshSystemUserToken/);
+  assert.match(
+    actions,
+    /connection\.connection_status === "CONNECTED" && !isExpired/
+  );
+  assert.match(
+    actions,
+    /isExpired && connection\.connection_status !== "REVOKED"/
+  );
+  assert.match(actions, /connection_status: "EXPIRED"/);
+  assert.match(actions, /Date\.parse\(connection\.token_expires_at\) <= Date\.now\(\)/);
+  assert.match(actions, /\.eq\("owner_id", ownerId\)/);
+  assert.equal(isTokenExpired("2025-12-31T23:59:59.000Z"), true);
+  assert.equal(isTokenExpired("2099-01-01T00:00:00.000Z"), false);
 });
 
 test("Unified Login persistence migration keeps legacy tables and owner-checks account upserts", () => {
@@ -976,4 +875,28 @@ test("Unified Login persistence migration keeps legacy tables and owner-checks a
     migration,
     /DROP TABLE|DELETE FROM public\.instagram_business_connections|DELETE FROM public\.instagram_unified_login_connections/i
   );
+});
+
+test("additive Unified Login migration requires only Instagram permissions", () => {
+  const migration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261111000001_unified_login_permissions.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const requiredPermissions = [
+    "instagram_basic",
+    "instagram_manage_comments",
+    "instagram_manage_messages",
+    "instagram_content_publish",
+  ];
+
+  for (const permission of requiredPermissions) {
+    assert.match(migration, new RegExp(`'${permission}'`));
+  }
+  assert.doesNotMatch(migration, /business_management/);
+  assert.match(migration, /WHERE existing\.owner_id = EXCLUDED\.owner_id/);
+  assert.match(migration, /FROM PUBLIC, anon, authenticated/);
+  assert.match(migration, /TO service_role/);
 });

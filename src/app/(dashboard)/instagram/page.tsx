@@ -12,8 +12,8 @@ import { redirect } from "next/navigation";
 import { Instagram } from "@/components/icons/Instagram";
 import {
   disconnectInstagramAccount,
+  reconnectUnifiedLoginConnection,
   refreshInstagramConnection,
-  refreshUnifiedLoginConnection,
 } from "./actions";
 import {
   isTokenExpired,
@@ -51,6 +51,9 @@ const statusMessages: Record<string, { text: string; success?: boolean }> = {
   },
   refresh_not_due: {
     text: "This token is not eligible for refresh yet. Try again later.",
+  },
+  reauthorize_not_due: {
+    text: "This connection is still valid. Reconnect will be available after the token expires.",
   },
   refresh_failed: {
     text: "The token could not be refreshed. Reconnect the Instagram account.",
@@ -314,9 +317,8 @@ export default async function InstagramPage({
 
         const expiresAt = connectionItem.token_expires_at;
         const expired = isTokenExpired(expiresAt);
-        const refreshDue =
-          connectionItem.connection_status === "CONNECTED" &&
-          isTokenRefreshDue(expiresAt, connectionItem.updated_at);
+        const reconnectRequired =
+          expired || connectionItem.connection_status !== "CONNECTED";
 
         return (
           <section
@@ -329,12 +331,12 @@ export default async function InstagramPage({
                 ? "This System User token has expired. Reconnect to restore access."
                 : connectionItem.connection_status === "CONNECTED"
                   ? expiresAt
-                    ? `System User token expires ${new Date(expiresAt).toLocaleDateString()}.`
+                    ? `System User token expires ${new Date(expiresAt).toLocaleDateString()}. It must be reconnected after expiry.`
                     : `System User token for business ${connectionItem.client_business_id} has no recorded expiration.`
                   : "This Meta Business Login connection needs to be reauthorized."}
             </p>
-            {refreshDue && (
-              <form action={refreshUnifiedLoginConnection}>
+            {reconnectRequired && (
+              <form action={reconnectUnifiedLoginConnection}>
                 <input
                   type="hidden"
                   name="connectionId"
@@ -344,7 +346,7 @@ export default async function InstagramPage({
                   type="submit"
                   className="inline-flex h-9 items-center justify-center rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted"
                 >
-                  Refresh access
+                  Reconnect Instagram
                 </button>
               </form>
             )}
@@ -370,6 +372,11 @@ export default async function InstagramPage({
             System User access tokens are encrypted and stored server-side.
             Meta validates the token type and granted permissions before
             assigned Instagram accounts are saved.
+          </li>
+
+          <li>
+            Unified Login System User tokens are not automatically refreshed.
+            Reconnect after the token expires to restore access.
           </li>
 
           <li>
