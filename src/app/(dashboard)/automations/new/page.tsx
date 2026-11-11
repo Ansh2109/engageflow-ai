@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, MessageSquare, Zap } from "lucide-react";
+import { redirect } from "next/navigation";
+import { CommentToDmBuilder } from "./comment-to-dm-builder";
+import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
   title: "Create automation",
@@ -60,7 +63,28 @@ export default async function NewAutomationPage({
   searchParams: Promise<{ type?: string }>;
 }) {
   const { type } = await searchParams;
-  if (type === "comment_to_dm" || type === "dm_keyword") {
+  if (type === "comment_to_dm") {
+    const supabase = await createClient();
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError || !authData.user) {
+      redirect("/login?redirectTo=%2Fautomations%2Fnew%3Ftype%3Dcomment_to_dm");
+    }
+
+    const { data: accounts, error: accountsError } = await supabase
+      .from("instagram_accounts")
+      .select("id, username, name, profile_picture_url")
+      .eq("owner_id", authData.user.id)
+      .eq("connection_status", "CONNECTED")
+      .order("created_at", { ascending: true });
+
+    if (accountsError) {
+      throw new Error("Unable to load connected Instagram accounts.");
+    }
+
+    return <CommentToDmBuilder accounts={accounts ?? []} />;
+  }
+
+  if (type === "dm_keyword") {
     const selectedType = automationTypes[type];
 
     return (
