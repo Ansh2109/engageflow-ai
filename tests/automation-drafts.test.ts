@@ -265,6 +265,43 @@ test("draft migration enforces DRAFT-only writes and account ownership in RLS an
   assert.match(migration, /GRANT EXECUTE ON FUNCTION[\s\S]*TO authenticated/);
 });
 
+test("child-table mutation policies require owner-owned DRAFT automations", () => {
+  const migration = readFileSync(
+    new URL(
+      "../supabase/migrations/20261111000003_automation_child_draft_only.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+
+  for (const table of ["automation_triggers", "automation_actions"]) {
+    for (const operation of ["insert", "update", "delete"]) {
+      const policy = migration.match(
+        new RegExp(
+          `CREATE POLICY "${table}_${operation}_own"[\\s\\S]*?;`
+        )
+      )?.[0];
+      assert.ok(policy, `missing ${table} ${operation} policy`);
+      assert.match(policy, /automation\.owner_id = \(SELECT auth\.uid\(\)\)/);
+      assert.match(policy, /automation\.status = 'DRAFT'/);
+
+      if (operation === "insert") {
+        assert.match(policy, /WITH CHECK/);
+      } else {
+        assert.match(policy, /USING/);
+      }
+      if (operation === "update") {
+        assert.match(policy, /USING[\s\S]*WITH CHECK/);
+      }
+    }
+  }
+
+  assert.doesNotMatch(
+    migration,
+    /DROP POLICY IF EXISTS "automation_(triggers|actions)_select_own"/
+  );
+});
+
 test("Supabase draft repository uses the session client and owner-scoped account checks", () => {
   const repository = readFileSync(
     new URL("../src/lib/automations/supabase-drafts.ts", import.meta.url),
