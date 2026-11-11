@@ -6,6 +6,24 @@ export const metadata: Metadata = {
   title: "Create automation",
 };
 
+type AutomationType = "comment_to_dm" | "dm_keyword";
+
+const automationTypes: Record<
+  AutomationType,
+  { title: string; description: string }
+> = {
+  comment_to_dm: {
+    title: "Comment-to-DM",
+    description:
+      "When someone comments a keyword on your post, automatically send them a private DM reply.",
+  },
+  dm_keyword: {
+    title: "DM keyword reply",
+    description:
+      "When someone sends you a DM containing a keyword, automatically reply with your predefined message.",
+  },
+};
+
 /** Automation type selector card */
 function TypeCard({
   href,
@@ -21,7 +39,7 @@ function TypeCard({
   return (
     <Link
       href={href}
-      className="bg-card border border-border rounded-xl p-6 flex flex-col gap-4 hover:border-primary/50 hover:bg-muted/30 transition-colors group"
+      className="group flex cursor-pointer flex-col gap-4 rounded-xl border border-border bg-card p-6 transition-colors hover:border-primary/50 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
     >
       <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
         <Icon className="h-6 w-6 text-primary" />
@@ -34,7 +52,45 @@ function TypeCard({
   );
 }
 
-export default function NewAutomationPage() {
+export default async function NewAutomationPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ type?: string }>;
+}) {
+  const { type } = await searchParams;
+  if (type === "comment_to_dm" || type === "dm_keyword") {
+    const selectedType = automationTypes[type];
+
+    return (
+      <div className="flex max-w-2xl flex-col gap-8">
+        <Link
+          href="/automations/new"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to automation types
+        </Link>
+
+        <div>
+          <h1 className="text-2xl font-bold">
+            Create {selectedType.title} automation
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {selectedType.description}
+          </p>
+        </div>
+
+        <div
+          role="status"
+          className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground"
+        >
+          Automation setup is not available yet. No automation will be saved
+          or activated from this page.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-8 max-w-2xl">
       {/* Back link */}
@@ -60,13 +116,13 @@ export default function NewAutomationPage() {
           href="/automations/new?type=comment_to_dm"
           Icon={MessageSquare}
           title="Comment-to-DM"
-          description="When someone comments a keyword on your post, automatically send them a private DM reply."
+          description={automationTypes.comment_to_dm.description}
         />
         <TypeCard
           href="/automations/new?type=dm_keyword"
           Icon={Zap}
           title="DM keyword reply"
-          description="When someone sends you a DM containing a keyword, automatically reply with your predefined message."
+          description={automationTypes.dm_keyword.description}
         />
       </div>
 
