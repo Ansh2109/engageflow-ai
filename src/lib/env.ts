@@ -21,6 +21,7 @@ export interface Env {
   metaConfigId: string;
   metaApiVersion: string;
   metaRedirectUri: string;
+  instagramWebhookVerifyToken: string;
 
   // Token encryption (Phase 4)
   tokenEncryptionKey: string;
@@ -38,6 +39,7 @@ export function getEnv(): Env {
     metaConfigId: process.env.META_CONFIG_ID,
     metaApiVersion: process.env.META_API_VERSION ?? "v27.0",
     metaRedirectUri: process.env.META_REDIRECT_URI,
+    instagramWebhookVerifyToken: process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN,
     tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
   } as const;
 

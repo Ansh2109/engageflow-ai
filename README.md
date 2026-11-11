@@ -41,6 +41,7 @@ META_APP_SECRET=<Meta app secret; server-only>
 META_CONFIG_ID=<Facebook Login for Business configuration ID>
 META_API_VERSION=v27.0
 META_REDIRECT_URI=<NEXT_PUBLIC_SITE_URL>/api/instagram/callback
+INSTAGRAM_WEBHOOK_VERIFY_TOKEN=<random server-only verification token>
 TOKEN_ENCRYPTION_KEY=<64-character hexadecimal AES-256 key>
 ```
 
@@ -73,8 +74,12 @@ In Meta's App Dashboard:
 6. For customers outside the app's roles/testers, request the required
    Advanced Access through Meta App Review and complete Business Verification
    where Meta requires it. Configure the app as **Live** for production.
-7. To receive Instagram webhook events, configure the HTTPS callback, verify
-   token, and webhook fields in Meta, then subscribe each authorized account.
+7. To receive Instagram webhook events, set a strong random
+   `INSTAGRAM_WEBHOOK_VERIFY_TOKEN` on the server and configure Meta's HTTPS
+   callback as `<app-origin>/api/webhooks/instagram`, using the same value as
+   the verification token. Keep this variable server-only; Meta request
+   signatures are validated with `META_APP_SECRET`. Subscribe the app to the
+   required webhook fields and subscribe each authorized Instagram account.
    See Meta's [Facebook Login for Business](https://developers.facebook.com/documentation/facebook-login/facebook-login-for-business),
    [Instagram API with Facebook Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login),
    [System User assigned Instagram accounts](https://developers.facebook.com/documentation/ads-commerce/marketing-api/reference/system-user/assigned_instagram_accounts),
@@ -85,6 +90,14 @@ In Meta's App Dashboard:
    [comment moderation](https://developers.facebook.com/documentation/instagram-platform/comment-moderation), and
    [content publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing)
    documentation.
+
+The webhook receiver validates Meta's raw-body `X-Hub-Signature-256` HMAC and
+stores validated events in the existing service-role-only `webhook_events`
+table. Duplicate deliveries are suppressed by the table's unique
+`(external_event_id, event_type)` constraint; this is not an exactly-once
+processing guarantee. The receiver only queues event data: it does not process
+events, send messages or replies, activate automations, or change lifecycle
+readiness.
 
 The server validates the authenticated Supabase user, a signed and single-use
 OAuth state, callback parameters, the returned token's `SYSTEM_USER` type, app

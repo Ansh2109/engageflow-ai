@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test:automation": "node --experimental-strip-types --test tests/automation-navigation.test.ts tests/automation-drafts.test.ts tests/media-pagination-request.test.ts tests/automation-lifecycle.test.ts tests/automation-media-validation.test.ts",
     "test:auth": "node --experimental-strip-types --test tests/auth-flow.test.ts",
-    "test:instagram": "node --conditions=react-server --experimental-strip-types --test tests/instagram-flow.test.ts"
+    "test:instagram": "node --conditions=react-server --experimental-strip-types --test tests/instagram-flow.test.ts tests/instagram-webhook.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
