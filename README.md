@@ -172,6 +172,11 @@ requires an HTTPS webhook endpoint, account subscriptions, the corresponding
 permissions, and compliance with Instagram's messaging windows (generally 24
 hours; some Click-to-Direct-ad interactions allow up to 7 days).
 
+Comment-to-DM drafts can be saved, edited, listed, and deleted after applying
+the additive `20261111000002_comment_to_dm_drafts.sql` migration. Drafts remain
+`DRAFT`; activation, webhook execution, and automatic Instagram replies are not
+implemented.
+
 Run the integration flow tests with `npm run test:instagram`; they use no live
 Meta credentials or network requests.
 

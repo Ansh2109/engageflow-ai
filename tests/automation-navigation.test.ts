@@ -50,7 +50,7 @@ test("Comment-to-DM builder uses the existing media API and cursor pagination", 
   assert.match(builder, /account\.name/);
 });
 
-test("Comment-to-DM controls remain preview-only and do not persist or send", () => {
+test("Comment-to-DM saves drafts but cannot activate or send", () => {
   const builder = readFileSync(
     new URL(
       "../src/app/(dashboard)/automations/new/comment-to-dm-builder.tsx",
@@ -59,11 +59,12 @@ test("Comment-to-DM controls remain preview-only and do not persist or send", ()
     "utf8"
   );
 
-  assert.match(builder, /Backend integration pending/);
-  assert.match(builder, /Preview only\./);
+  assert.match(builder, /\/api\/automations/);
+  assert.match(builder, /Draft saved\. It will not run or send messages/);
+  assert.match(builder, /disabled\s+title="Activation is not implemented"/);
+  assert.match(builder, /saved drafts never run or send messages/);
   assert.match(builder, /\{\{username\}\}/);
   assert.match(builder, /\{\{first_name\}\}/);
   assert.match(builder, /\{\{account_name\}\}/);
-  assert.doesNotMatch(builder, /method:\s*["']POST["']/i);
   assert.doesNotMatch(builder, /\/api\/instagram\/(?:comment-reply|automations)/);
 });

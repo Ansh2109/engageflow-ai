@@ -60,9 +60,9 @@ function TypeCard({
 export default async function NewAutomationPage({
   searchParams,
 }: {
-  searchParams: Promise<{ type?: string }>;
+  searchParams: Promise<{ type?: string; draftId?: string }>;
 }) {
-  const { type } = await searchParams;
+  const { type, draftId } = await searchParams;
   if (type === "comment_to_dm") {
     const supabase = await createClient();
     const { data: authData, error: authError } = await supabase.auth.getUser();
@@ -81,7 +81,13 @@ export default async function NewAutomationPage({
       throw new Error("Unable to load connected Instagram accounts.");
     }
 
-    return <CommentToDmBuilder accounts={accounts ?? []} />;
+    return (
+      <CommentToDmBuilder
+        key={draftId ?? "new"}
+        accounts={accounts ?? []}
+        initialDraftId={draftId ?? null}
+      />
+    );
   }
 
   if (type === "dm_keyword") {

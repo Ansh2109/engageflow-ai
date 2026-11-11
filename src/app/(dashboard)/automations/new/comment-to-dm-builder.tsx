@@ -27,6 +27,8 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import { useRouter } from "next/navigation";
+import type { AutomationDraft } from "@/lib/automations/drafts";
 import { MediaPaginationRequestGuard } from "@/lib/instagram/media-pagination-request";
 
 type ConnectedInstagramAccount = {
@@ -53,6 +55,7 @@ type MediaResponse = {
 
 type CommentToDmBuilderProps = {
   accounts: ConnectedInstagramAccount[];
+  initialDraftId: string | null;
 };
 
 type MatchMode = "exact" | "contains";
@@ -112,10 +115,14 @@ function MediaThumbnail({
 
 export function CommentToDmBuilder({
   accounts,
+  initialDraftId,
 }: CommentToDmBuilderProps) {
+  const router = useRouter();
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
   const [media, setMedia] = useState<InstagramMedia[]>([]);
   const [selectedMediaId, setSelectedMediaId] = useState("");
+  const [selectedMediaType, setSelectedMediaType] =
+    useState<InstagramMedia["mediaType"] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMedia, setLoadingMedia] = useState(Boolean(accounts[0]?.id));
   const [loadingMore, setLoadingMore] = useState(false);
@@ -130,6 +137,11 @@ export function CommentToDmBuilder({
   const [publicReply, setPublicReply] = useState(INITIAL_PUBLIC_REPLY);
   const [notice, setNotice] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [draftId, setDraftId] = useState(initialDraftId);
+  const [loadingDraft, setLoadingDraft] = useState(Boolean(initialDraftId));
+  const [draftReady, setDraftReady] = useState(!initialDraftId);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const pendingMediaId = useRef<string | null>(null);
   const requestId = useRef(0);
   const requestController = useRef<AbortController | null>(null);
   const paginationGuard = useRef(new MediaPaginationRequestGuard());
@@ -144,6 +156,54 @@ export function CommentToDmBuilder({
         .filter(Boolean),
     [keywords]
   );
+
+  useEffect(() => {
+    if (!initialDraftId) return;
+    const controller = new AbortController();
+    let active = true;
+
+    void fetch(`/api/automations/${encodeURIComponent(initialDraftId)}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as {
+          draft?: AutomationDraft;
+        };
+        if (!active) return;
+        if (!response.ok || !body.draft) {
+          setNotice("This draft could not be loaded. Return to Automations and try again.");
+          return;
+        }
+
+        const draft = body.draft;
+        setDraftReady(true);
+        pendingMediaId.current = draft.mediaId;
+        setDraftId(draft.id);
+        setAutomationName(draft.name);
+        setAccountId(draft.accountId);
+        setSelectedMediaId(draft.mediaId);
+        setSelectedMediaType(draft.mediaType);
+        setMatchMode(draft.matchMode === "EXACT" ? "exact" : "contains");
+        setKeywords(draft.keywords.join(", "));
+        setDmMessage(draft.privateMessage);
+        setPublicReplyEnabled(draft.publicReplyEnabled);
+        setPublicReply(draft.publicReply);
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) {
+          setNotice("This draft could not be reached. Please try again.");
+        }
+      })
+      .finally(() => {
+        if (active) setLoadingDraft(false);
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [initialDraftId]);
 
   useEffect(() => {
     requestId.current += 1;
@@ -172,7 +232,16 @@ export function CommentToDmBuilder({
           return;
         }
         setMedia(body.media);
-        setSelectedMediaId(body.media[0]?.id ?? "");
+        const preferredMediaId = pendingMediaId.current;
+        setSelectedMediaId(preferredMediaId ?? body.media[0]?.id ?? "");
+        const preferredMedia = body.media.find(
+          ({ id }) => id === preferredMediaId
+        );
+        setSelectedMediaType((current) =>
+          preferredMedia?.mediaType ??
+          (preferredMediaId ? current : body.media[0]?.mediaType ?? null)
+        );
+        pendingMediaId.current = null;
         setNextCursor(body.nextCursor ?? null);
       })
       .catch(() => {
@@ -258,6 +327,7 @@ export function CommentToDmBuilder({
 
   const handleAccountChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextAccountId = event.target.value;
+    pendingMediaId.current = null;
     requestId.current += 1;
     requestController.current?.abort();
     requestController.current = null;
@@ -265,10 +335,63 @@ export function CommentToDmBuilder({
     setLoadingMore(false);
     setMedia([]);
     setSelectedMediaId("");
+    setSelectedMediaType(null);
     setNextCursor(null);
     setMediaError(null);
     setLoadingMedia(Boolean(nextAccountId));
     setAccountId(nextAccountId);
+  };
+
+  const saveDraft = async () => {
+    if (savingDraft || loadingDraft) return;
+    setSavingDraft(true);
+    setNotice(null);
+    try {
+      const response = await fetch(
+        draftId ? `/api/automations/${encodeURIComponent(draftId)}` : "/api/automations",
+        {
+          method: draftId ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: automationName,
+            accountId,
+            mediaId: selectedMediaId,
+            mediaType: selectedMediaType,
+            matchMode: matchMode.toUpperCase(),
+            keywords: keywordList,
+            privateMessage: dmMessage,
+            publicReplyEnabled,
+            publicReply,
+          }),
+        }
+      );
+      const body = (await response.json().catch(() => ({}))) as {
+        draft?: AutomationDraft;
+        error?: string;
+      };
+      if (!response.ok || !body.draft) {
+        setNotice(
+          response.status === 401
+            ? "Please sign in again to save this draft."
+            : body.error === "draft_or_account_not_found"
+              ? "The selected draft or connected Instagram account is no longer available."
+              : "Draft could not be saved. Check the required fields and try again."
+        );
+        return;
+      }
+
+      setDraftId(body.draft.id);
+      setAutomationName(body.draft.name);
+      setNotice("Draft saved. It will not run or send messages.");
+      router.replace(
+        `/automations/new?type=comment_to_dm&draftId=${encodeURIComponent(body.draft.id)}`,
+        { scroll: false }
+      );
+    } catch {
+      setNotice("Draft could not be reached. Please try again.");
+    } finally {
+      setSavingDraft(false);
+    }
   };
 
   const previewMessage = messageWithSampleValues(dmMessage);
@@ -311,32 +434,38 @@ export function CommentToDmBuilder({
           </button>
           <button
             type="button"
-            onClick={() =>
-              setNotice("Backend integration pending. This draft was not saved.")
+            disabled={
+              savingDraft ||
+              loadingDraft ||
+              !draftReady ||
+              !accountId ||
+              !selectedMediaId ||
+              !selectedMediaType ||
+              keywordList.length === 0 ||
+              !dmMessage.trim() ||
+              (publicReplyEnabled && !publicReply.trim())
             }
-            className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-white/10 px-3 text-sm font-medium text-slate-200 transition hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+            onClick={() => void saveDraft()}
+            className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-white/10 px-3 text-sm font-medium text-slate-200 transition hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Save className="h-4 w-4" />
-            Save Draft
+            {savingDraft ? "Saving..." : "Save Draft"}
           </button>
           <button
             type="button"
-            onClick={() =>
-              setNotice(
-                "Backend integration pending. This automation was not activated."
-              )
-            }
-            className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-violet-500 px-4 text-sm font-semibold text-white transition hover:bg-violet-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b0d19]"
+            disabled
+            title="Activation is not implemented"
+            className="inline-flex min-h-10 cursor-not-allowed items-center gap-2 rounded-xl bg-violet-500/50 px-4 text-sm font-semibold text-white/70"
           >
             <Zap className="h-4 w-4" />
-            Go Live
+            Go Live unavailable
           </button>
         </div>
       </header>
 
       <div className="border-b border-violet-400/15 bg-violet-400/[0.06] px-4 py-2.5 text-xs text-violet-100 sm:px-6">
-        <span className="font-semibold">Preview only.</span> Saving and
-        activation are not connected to a backend.
+        <span className="font-semibold">Drafts can be saved.</span> Activation
+        is not implemented; saved drafts never run or send messages.
       </div>
 
       {notice && (
@@ -361,7 +490,7 @@ export function CommentToDmBuilder({
           role="status"
           className="mx-4 mt-4 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300 sm:mx-6"
         >
-          Advanced editor is not included in this visual-builder phase.
+          Advanced editor is not included in this phase.
         </div>
       )}
 
@@ -488,6 +617,7 @@ export function CommentToDmBuilder({
                   <select
                     id="instagram-account"
                     value={accountId}
+                    disabled={loadingDraft}
                     onChange={handleAccountChange}
                     className="min-h-11 w-full appearance-none rounded-xl border border-white/10 bg-[#191c2c] px-3 pr-9 text-sm text-white outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-400/20"
                   >
@@ -549,7 +679,10 @@ export function CommentToDmBuilder({
                         type="button"
                         aria-pressed={selected}
                         aria-label={`Select ${item.mediaType === "IMAGE" ? "post" : "Reel or video"}${item.caption ? `: ${item.caption.slice(0, 100)}` : ""}`}
-                        onClick={() => setSelectedMediaId(item.id)}
+                        onClick={() => {
+                          setSelectedMediaId(item.id);
+                          setSelectedMediaType(item.mediaType);
+                        }}
                         className={`group overflow-hidden rounded-xl border text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${
                           selected
                             ? "border-violet-400 ring-2 ring-violet-400/25"
@@ -720,7 +853,7 @@ export function CommentToDmBuilder({
                 <Sparkles className="h-3.5 w-3.5" />
                 Not connected to automation backend
               </div>
-              Your edits are temporary and will be lost when you leave this page.
+              Saved drafts are stored for editing only. They are never activated or executed.
             </div>
           </div>
         </aside>

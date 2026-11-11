@@ -7,7 +7,7 @@ export type Json =
   | Json[];
 
 export type AutomationType = "COMMENT_TO_DM" | "DM_KEYWORD";
-export type AutomationStatus = "ACTIVE" | "PAUSED";
+export type AutomationStatus = "DRAFT" | "ACTIVE" | "PAUSED";
 export type TriggerType = "COMMENT_KEYWORD" | "DM_KEYWORD";
 export type MatchType = "EXACT" | "CONTAINS";
 export type ActionType = "SEND_DM" | "REPLY_COMMENT" | "SEND_DM_AND_REPLY_COMMENT";
@@ -307,6 +307,7 @@ export interface Database {
           status: AutomationStatus;
           target_post_id: string | null;
           target_post_url: string | null;
+          target_media_type: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -319,6 +320,7 @@ export interface Database {
           status?: AutomationStatus;
           target_post_id?: string | null;
           target_post_url?: string | null;
+          target_media_type?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -331,6 +333,7 @@ export interface Database {
           status?: AutomationStatus;
           target_post_id?: string | null;
           target_post_url?: string | null;
+          target_media_type?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -400,6 +403,7 @@ export interface Database {
           action_type: ActionType;
           message_text: string;
           public_comment_reply_text: string | null;
+          public_reply_enabled: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -409,6 +413,7 @@ export interface Database {
           action_type: ActionType;
           message_text: string;
           public_comment_reply_text?: string | null;
+          public_reply_enabled?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -418,6 +423,7 @@ export interface Database {
           action_type?: ActionType;
           message_text?: string;
           public_comment_reply_text?: string | null;
+          public_reply_enabled?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -618,6 +624,21 @@ export interface Database {
           p_token_expires_at: string | null;
           p_scopes: string[];
           p_accounts: Json;
+        };
+        Returns: string;
+      };
+      save_comment_to_dm_draft: {
+        Args: {
+          p_automation_id: string | null;
+          p_instagram_account_id: string;
+          p_name: string;
+          p_media_id: string;
+          p_media_type: string;
+          p_match_type: string;
+          p_keywords: string[];
+          p_message_text: string;
+          p_public_reply_enabled: boolean;
+          p_public_comment_reply_text: string | null;
         };
         Returns: string;
       };
