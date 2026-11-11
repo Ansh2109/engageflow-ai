@@ -6,6 +6,8 @@ export const metadata: Metadata = {
   title: "Create automation",
 };
 
+export const instant = false;
+
 type AutomationType = "comment_to_dm" | "dm_keyword";
 
 const automationTypes: Record<
