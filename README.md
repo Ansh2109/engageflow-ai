@@ -177,6 +177,88 @@ the additive `20261111000002_comment_to_dm_drafts.sql` migration. Drafts remain
 `DRAFT`; activation, webhook execution, and automatic Instagram replies are not
 implemented.
 
+### Automation lifecycle
+
+The additive `20261111000003_automation_child_draft_only.sql` migration
+restricts authenticated trigger and action writes to owner-owned drafts.
+`20261111000004_automation_lifecycle.sql` adds owner-scoped lifecycle
+transitions and an append-only lifecycle history separate from message
+execution logs.
+
+Allowed transitions are `DRAFT → ACTIVE` (Activate), `ACTIVE → PAUSED`
+(Pause), and `PAUSED → ACTIVE` (Resume). Draft editing and deletion remain
+draft-only; active and paused automations cannot be edited or deleted. There is
+no transition back to draft.
+
+Activation and resume are fail-closed. The database checks account ownership
+and connection status, stored token expiry and permission scopes, automation
+configuration, and a privileged runtime-readiness record. That record defaults
+to unavailable and requires recent verification of Meta webhook subscription,
+event ingestion, event processing, message execution, retry safety, and
+idempotency. Comment-to-DM activation also requires a fresh, server-written
+verification record matching the automation, connected account, and selected
+media. Media evidence is created only by
+`POST /api/automations/{id}/media-validation`, which loads an owned draft,
+verifies media ownership and type with Meta using the server-side account
+token, then records short-lived evidence. Authenticated users cannot modify
+either readiness source, and runtime readiness has no application provisioning
+path. No readiness attestation tool, webhook processor, or automation message
+execution service currently exists in this application, so Activate and Resume
+remain blocked; this feature does not send Instagram messages. Pause remains
+available for an automation already stored as `ACTIVE`.
+
+The lifecycle API is session-authenticated and uses the caller's Supabase
+session (no service-role client):
+
+- `GET /api/automations/readiness` returns readiness per owned automation.
+- `POST /api/automations/{id}/lifecycle` accepts exactly
+  `{"action":"ACTIVATE"}`, `{"action":"PAUSE"}`, or `{"action":"RESUME"}`.
+- `GET /api/automations/{id}/lifecycle` returns owner-scoped lifecycle events.
+
+Mutations require a same-origin `Origin` header. The database transition
+function locks the owner-owned automation row, validates the transition and
+readiness, and atomically updates status. A private transaction-scoped,
+single-use permit and database trigger prevent direct inserts or updates from
+changing status in either direction, including `ACTIVE`/`PAUSED` back to
+`DRAFT`. The permit is inaccessible to application roles, is consumed by the
+trigger for the exact prior/next status pair, and must be absent after the RPC
+completes. Account-disconnection pauses also use the lifecycle RPC through a
+database trigger; service-role RPC calls are restricted to pausing automations
+whose account is no longer connected. The transition function locks the
+Instagram account before the automation row for activation/resume so account
+disconnects and lifecycle changes use a consistent lock order.
+Its status trigger writes lifecycle events; authenticated users can read only
+their own events and cannot insert, update, or delete them. The trigger records
+new automation creation as well as status changes, including
+account-disconnection pauses. Existing automations receive a baseline status
+event at migration time; it does not claim their original status or creation
+history is known.
+
+Apply migrations manually in filename order after reviewing them against the
+target Supabase schema. Do not mark runtime readiness true until every listed
+capability is implemented and operationally verified. Future readiness
+provisioning must be an out-of-band, reviewed operation by a trusted database
+administrator (or a separately secured operator-only deployment job), never a
+user-facing route or ordinary service-role request. Before provisioning,
+verify each webhook, ingestion, processor, executor, retry, and idempotency
+capability with operational evidence; update the singleton row in one audited
+transaction with `last_verified_at` set by the database clock. Revoke or clear
+readiness immediately when any capability regresses, and re-verify after
+relevant deployments. The application currently provides no readiness write
+API. Never expose a service-role key to browser code.
+
+Run lifecycle and draft regressions with:
+
+```powershell
+npm run test:automation
+npm run test:instagram
+npm run test:auth
+npx tsc --noEmit
+npm run lint
+npm run build
+git diff --check
+```
+
 Run the integration flow tests with `npm run test:instagram`; they use no live
 Meta credentials or network requests.
 

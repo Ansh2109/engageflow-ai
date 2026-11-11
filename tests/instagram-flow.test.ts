@@ -31,6 +31,7 @@ import {
   MetaApiError,
   replyToInstagramComment,
   refreshInstagramLongLivedToken,
+  verifyInstagramMedia,
   verifyInstagramMediaOwnership,
 } from "../src/lib/instagram/meta.ts";
 import {
@@ -884,6 +885,41 @@ test("Instagram comments are read from owned media with safe fields and bounded 
       "id,text,timestamp,username,hidden"
     );
     assert.equal(requests[2].searchParams.get("after"), "comments-next-cursor");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("server-side media verification confirms ownership and media type", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    requests.push(url);
+    return Response.json({
+      id: "18000000000000001",
+      owner: { id: "17841400000000002" },
+      media_type: "VIDEO",
+    });
+  };
+
+  try {
+    assert.equal(
+      await verifyInstagramMedia(
+        {
+          appId: "1234567890",
+          appSecret: "test-app-secret",
+          configId: "9876543210",
+          apiVersion: "v27.0",
+          redirectUri: "https://engage.example/api/instagram/callback",
+        },
+        "server-only-system-user-token",
+        "17841400000000002",
+        "18000000000000001"
+      ),
+      "VIDEO"
+    );
+    assert.equal(requests[0].searchParams.get("fields"), "id,owner,media_type");
   } finally {
     globalThis.fetch = originalFetch;
   }

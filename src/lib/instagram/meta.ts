@@ -358,6 +358,36 @@ export async function verifyInstagramMediaOwnership(
   }
 }
 
+export async function verifyInstagramMedia(
+  config: MetaConfig,
+  accessToken: string,
+  instagramUserId: string,
+  mediaId: string
+): Promise<MetaInstagramMedia["mediaType"]> {
+  if (!isValidMetaId(instagramUserId) || !isValidMetaId(mediaId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+
+  const media = asRecord(
+    await requestJson(config, mediaId, accessToken, {
+      params: { fields: "id,owner,media_type" },
+    })
+  );
+  const owner = asRecord(media?.owner);
+  if (media?.id !== mediaId || owner?.id !== instagramUserId) {
+    throw new MetaApiError("meta_media_not_owned");
+  }
+  if (
+    media.media_type !== "IMAGE" &&
+    media.media_type !== "VIDEO" &&
+    media.media_type !== "CAROUSEL_ALBUM"
+  ) {
+    throw new MetaApiError("meta_media_invalid_response");
+  }
+
+  return media.media_type;
+}
+
 export async function getInstagramComments(
   config: MetaConfig,
   accessToken: string,

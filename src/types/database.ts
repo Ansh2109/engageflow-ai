@@ -8,6 +8,14 @@ export type Json =
 
 export type AutomationType = "COMMENT_TO_DM" | "DM_KEYWORD";
 export type AutomationStatus = "DRAFT" | "ACTIVE" | "PAUSED";
+export type AutomationLifecycleAction = "ACTIVATE" | "PAUSE" | "RESUME";
+export type AutomationLifecycleEventAction =
+  | "CREATED"
+  | "BASELINE"
+  | "ACTIVATED"
+  | "PAUSED"
+  | "RESUMED"
+  | "STATUS_CHANGED";
 export type TriggerType = "COMMENT_KEYWORD" | "DM_KEYWORD";
 export type MatchType = "EXACT" | "CONTAINS";
 export type ActionType = "SEND_DM" | "REPLY_COMMENT" | "SEND_DM_AND_REPLY_COMMENT";
@@ -564,6 +572,158 @@ export interface Database {
           },
         ];
       };
+      automation_runtime_readiness: {
+        Row: {
+          singleton: boolean;
+          webhook_verified: boolean;
+          event_ingestion_operational: boolean;
+          event_processor_operational: boolean;
+          message_executor_operational: boolean;
+          retry_policy_verified: boolean;
+          idempotency_verified: boolean;
+          last_verified_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          singleton?: boolean;
+          webhook_verified?: boolean;
+          event_ingestion_operational?: boolean;
+          event_processor_operational?: boolean;
+          message_executor_operational?: boolean;
+          retry_policy_verified?: boolean;
+          idempotency_verified?: boolean;
+          last_verified_at?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          singleton?: boolean;
+          webhook_verified?: boolean;
+          event_ingestion_operational?: boolean;
+          event_processor_operational?: boolean;
+          message_executor_operational?: boolean;
+          retry_policy_verified?: boolean;
+          idempotency_verified?: boolean;
+          last_verified_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      automation_media_validations: {
+        Row: {
+          automation_id: string;
+          owner_id: string;
+          instagram_account_id: string;
+          media_id: string;
+          media_type: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM";
+          is_valid: boolean;
+          verified_at: string;
+          valid_until: string;
+        };
+        Insert: {
+          automation_id: string;
+          owner_id: string;
+          instagram_account_id: string;
+          media_id: string;
+          media_type: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM";
+          is_valid: boolean;
+          verified_at: string;
+          valid_until: string;
+        };
+        Update: {
+          automation_id?: string;
+          owner_id?: string;
+          instagram_account_id?: string;
+          media_id?: string;
+          media_type?: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM";
+          is_valid?: boolean;
+          verified_at?: string;
+          valid_until?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "automation_media_validation_automation_owner_fkey";
+            columns: ["automation_id", "owner_id"];
+            isOneToOne: true;
+            referencedRelation: "automations";
+            referencedColumns: ["id", "owner_id"];
+          },
+          {
+            foreignKeyName: "automation_media_validation_account_owner_fkey";
+            columns: ["instagram_account_id", "owner_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_accounts";
+            referencedColumns: ["id", "owner_id"];
+          },
+        ];
+      };
+      automation_lifecycle_events: {
+        Row: {
+          id: string;
+          automation_id: string;
+          owner_id: string;
+          previous_status: AutomationStatus | null;
+          new_status: AutomationStatus;
+          action: AutomationLifecycleEventAction;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          automation_id: string;
+          owner_id: string;
+          previous_status?: AutomationStatus | null;
+          new_status: AutomationStatus;
+          action: AutomationLifecycleEventAction;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          automation_id?: string;
+          owner_id?: string;
+          previous_status?: AutomationStatus | null;
+          new_status?: AutomationStatus;
+          action?: AutomationLifecycleEventAction;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "automation_lifecycle_events_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      automation_lifecycle_transition_permits: {
+        Row: {
+          transaction_id: number;
+          automation_id: string;
+          owner_id: string;
+          previous_status: AutomationStatus;
+          target_status: Exclude<AutomationStatus, "DRAFT">;
+          action: AutomationLifecycleAction;
+        };
+        Insert: {
+          transaction_id: number;
+          automation_id: string;
+          owner_id: string;
+          previous_status: AutomationStatus;
+          target_status: Exclude<AutomationStatus, "DRAFT">;
+          action: AutomationLifecycleAction;
+        };
+        Update: {
+          transaction_id?: number;
+          automation_id?: string;
+          owner_id?: string;
+          previous_status?: AutomationStatus;
+          target_status?: Exclude<AutomationStatus, "DRAFT">;
+          action?: AutomationLifecycleAction;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -641,6 +801,24 @@ export interface Database {
           p_public_comment_reply_text: string | null;
         };
         Returns: string;
+      };
+      get_automation_execution_readiness: {
+        Args: { p_automation_id: string | null };
+        Returns: {
+          automation_id: string;
+          ready: boolean;
+          blockers: string[];
+        }[];
+      };
+      transition_automation_lifecycle: {
+        Args: {
+          p_automation_id: string;
+          p_action: AutomationLifecycleAction;
+        };
+        Returns: {
+          status: AutomationStatus;
+          updated_at: string;
+        }[];
       };
     };
     Enums: {
