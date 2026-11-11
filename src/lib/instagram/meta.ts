@@ -54,6 +54,33 @@ export type MetaInstagramMediaPage = {
   nextCursor: string | null;
 };
 
+export type MetaInstagramComment = {
+  id: string;
+  text: string;
+  timestamp: string;
+  username: string | null;
+  hidden: boolean | null;
+};
+
+export type MetaInstagramCommentPage = {
+  comments: MetaInstagramComment[];
+  nextCursor: string | null;
+};
+
+export type MetaInstagramCommentReplyTarget = {
+  id: string;
+  mediaId: string;
+  hidden: boolean;
+  parentId: string | null;
+};
+
+export function isInstagramCommentReplyableOnMedia(
+  comment: MetaInstagramCommentReplyTarget,
+  mediaId: string
+): boolean {
+  return comment.mediaId === mediaId && !comment.hidden && comment.parentId === null;
+}
+
 export type ExchangedMetaToken = {
   accessToken: string;
   expiresAt: string | null;
@@ -150,31 +177,41 @@ async function requestJson(
   { method = "GET", params = {} }: GraphRequestOptions = {}
 ): Promise<unknown> {
   const url = graphUrl(config, path);
-  url.searchParams.set("access_token", accessToken);
-  url.searchParams.set(
-    "appsecret_proof",
-    appSecretProof(accessToken, config.appSecret)
-  );
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
+  const requestParams = new URLSearchParams({
+    access_token: accessToken,
+    appsecret_proof: appSecretProof(accessToken, config.appSecret),
+    ...params,
+  });
+  const requestOptions: RequestInit = {
+    method,
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  };
+  if (method === "GET") {
+    requestParams.forEach((value, key) => url.searchParams.set(key, value));
+  } else {
+    requestOptions.headers = {
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    requestOptions.body = requestParams.toString();
   }
 
   let response: Response;
   try {
-    response = await fetch(url, {
-      method,
-      cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
-    });
+    response = await fetch(url, requestOptions);
   } catch {
-    throw new MetaApiError("meta_unavailable");
+    throw new MetaApiError(
+      method === "POST" ? "meta_post_outcome_unknown" : "meta_unavailable"
+    );
   }
 
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
-    throw new MetaApiError("meta_invalid_response");
+    throw new MetaApiError(
+      method === "POST" ? "meta_post_outcome_unknown" : "meta_invalid_response"
+    );
   }
 
   if (!response.ok) {
@@ -298,6 +335,183 @@ export async function getInstagramMedia(
     media,
     nextCursor: typeof nextCursor === "string" ? nextCursor : null,
   };
+}
+
+export async function verifyInstagramMediaOwnership(
+  config: MetaConfig,
+  accessToken: string,
+  instagramUserId: string,
+  mediaId: string
+): Promise<void> {
+  if (!isValidMetaId(instagramUserId) || !isValidMetaId(mediaId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+
+  const media = asRecord(
+    await requestJson(config, mediaId, accessToken, {
+      params: { fields: "id,owner" },
+    })
+  );
+  const owner = asRecord(media?.owner);
+  if (media?.id !== mediaId || owner?.id !== instagramUserId) {
+    throw new MetaApiError("meta_media_not_owned");
+  }
+}
+
+export async function getInstagramComments(
+  config: MetaConfig,
+  accessToken: string,
+  mediaId: string,
+  after?: string
+): Promise<MetaInstagramCommentPage> {
+  if (!isValidMetaId(mediaId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+  if (
+    after !== undefined &&
+    (after.length === 0 || after.length > 512 || /[\u0000-\u001f]/.test(after))
+  ) {
+    throw new MetaApiError("meta_pagination_invalid");
+  }
+
+  const payload = asRecord(
+    await requestJson(config, `${mediaId}/comments`, accessToken, {
+      params: {
+        fields: "id,text,timestamp,username,hidden",
+        limit: "50",
+        ...(after ? { after } : {}),
+      },
+    })
+  );
+  if (!payload || !Array.isArray(payload.data)) {
+    throw new MetaApiError("meta_comments_invalid_response");
+  }
+
+  const comments = payload.data.map((value) => {
+    const comment = asRecord(value);
+    if (
+      !comment ||
+      !isValidMetaId(comment.id) ||
+      typeof comment.text !== "string" ||
+      typeof comment.timestamp !== "string" ||
+      !Number.isFinite(Date.parse(comment.timestamp)) ||
+      (comment.hidden !== undefined && typeof comment.hidden !== "boolean")
+    ) {
+      throw new MetaApiError("meta_comments_invalid_response");
+    }
+
+    return {
+      id: comment.id,
+      text: comment.text,
+      timestamp: comment.timestamp,
+      username: typeof comment.username === "string" ? comment.username : null,
+      hidden: typeof comment.hidden === "boolean" ? comment.hidden : null,
+    };
+  });
+
+  const paging = asRecord(payload.paging);
+  const cursors = asRecord(paging?.cursors);
+  const hasNextPage = typeof paging?.next === "string" && paging.next !== "";
+  const nextCursor = hasNextPage ? cursors?.after : null;
+  if (
+    hasNextPage &&
+    (typeof nextCursor !== "string" ||
+      nextCursor.length === 0 ||
+      nextCursor.length > 512 ||
+      /[\u0000-\u001f]/.test(nextCursor))
+  ) {
+    throw new MetaApiError("meta_pagination_invalid");
+  }
+
+  return {
+    comments,
+    nextCursor: typeof nextCursor === "string" ? nextCursor : null,
+  };
+}
+
+export async function getInstagramCommentReplyTarget(
+  config: MetaConfig,
+  accessToken: string,
+  commentId: string
+): Promise<MetaInstagramCommentReplyTarget> {
+  if (!isValidMetaId(commentId)) {
+    throw new MetaApiError("meta_identity_invalid");
+  }
+
+  const comment = asRecord(
+    await requestJson(config, commentId, accessToken, {
+      params: { fields: "id,hidden,media,parent_id" },
+    })
+  );
+  const media = asRecord(comment?.media);
+  if (
+    comment?.id !== commentId ||
+    typeof comment.hidden !== "boolean" ||
+    !isValidMetaId(media?.id) ||
+    (comment.parent_id !== undefined &&
+      comment.parent_id !== null &&
+      !isValidMetaId(comment.parent_id))
+  ) {
+    throw new MetaApiError("meta_comment_invalid_response");
+  }
+
+  return {
+    id: commentId,
+    mediaId: media.id,
+    hidden: comment.hidden,
+    parentId:
+      typeof comment.parent_id === "string" ? comment.parent_id : null,
+  };
+}
+
+const REPLY_ATTEMPT_TTL_MS = 15 * 60 * 1000;
+const MAX_REPLY_ATTEMPTS = 10_000;
+const replyAttempts = new Map<string, number>();
+
+export function claimInstagramCommentReplyAttempt(
+  accountId: string,
+  commentId: string,
+  now = Date.now()
+): boolean {
+  for (const [key, expiresAt] of replyAttempts) {
+    if (expiresAt <= now) replyAttempts.delete(key);
+  }
+
+  const key = `${accountId}:${commentId}`;
+  if (replyAttempts.has(key) || replyAttempts.size >= MAX_REPLY_ATTEMPTS) {
+    return false;
+  }
+
+  replyAttempts.set(key, now + REPLY_ATTEMPT_TTL_MS);
+  return true;
+}
+
+export async function replyToInstagramComment(
+  config: MetaConfig,
+  accessToken: string,
+  commentId: string,
+  message: string
+): Promise<{ id: string }> {
+  const normalizedMessage = message.trim();
+  if (
+    !isValidMetaId(commentId) ||
+    normalizedMessage.length === 0 ||
+    [...normalizedMessage].length > 2200
+  ) {
+    throw new MetaApiError("meta_comment_reply_invalid");
+  }
+
+  const payload = asRecord(
+    await requestJson(config, `${commentId}/replies`, accessToken, {
+      method: "POST",
+      params: { message: normalizedMessage },
+    })
+  );
+  if (!payload || !isValidMetaId(payload.id)) {
+    throw new MetaApiError("meta_post_outcome_unknown");
+  }
+
+  return { id: payload.id };
 }
 
 function tokenExpiry(expiresAt: unknown): string | null {

@@ -127,6 +127,42 @@ Unified Login token; unrelated legacy and direct Instagram Login connection
 records are not deleted. To revoke the Meta grant itself, the user must also
 remove EngageFlow from the connected Meta Business integration.
 
+### Public comment reply proof of concept
+
+The authenticated `GET /api/instagram/comments?accountId=<ACCOUNT_ID>&mediaId=<MEDIA_ID>`
+route lists up to 50 top-level comments for media owned by the selected
+connected account. If Meta returns a `nextCursor`, request the next page with
+`&after=<NEXT_CURSOR>`; the route returns the next cursor or `null`. The server
+verifies account ownership and media ownership before using the encrypted
+System User token.
+
+The `POST /api/instagram/comment-reply` route accepts
+`{ "accountId": "...", "mediaId": "...", "commentId": "...", "message": "...", "confirm": true }`.
+It requires a same-origin request, a currently visible top-level comment
+on that exact media, and explicit `confirm: true`. The route checks the
+comment directly rather than searching only the first comments page, and
+rejects hidden comments and replies to another comment. It allows up to 2,200
+Unicode code points in a reply. This is a server-side manual proof of concept;
+it does not run automatically, and tests do not call Meta or publish a reply.
+An uncertain POST result is not retried. Verify the comment in Instagram before
+deciding what to do next.
+Before posting, the operator must confirm the media is not a Live video;
+this proof of concept does not determine Live status.
+
+Duplicate submission protection is process-local and blocks another attempt
+for the same account/comment for 15 minutes after the server begins the POST.
+This reduces concurrent and immediate duplicate requests but is not durable
+across server restarts or multiple serverless instances and does not guarantee
+exactly-once delivery.
+
+Meta's Unified Login comment reference documents Business Integration System
+User tokens and `instagram_basic` plus `instagram_manage_comments` for comment
+operations. The specific reply reference has a different token/permission
+description. The current connection uses the Unified Login System User token
+and does not request additional permissions; validate write compatibility on
+an explicitly approved test comment before enabling broader use. Hidden
+comments and comments on Live video are not replyable.
+
 **Repository limitation:** this source tree currently has no Instagram webhook
 route, account webhook-subscription call, or automation event processor. It
 contains automation and webhook-event database tables, but connecting an

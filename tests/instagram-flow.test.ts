@@ -20,12 +20,18 @@ import {
   shouldDeleteBusinessConnection,
 } from "../src/lib/instagram/flow.ts";
 import {
+  claimInstagramCommentReplyAttempt,
   exchangeMetaCode,
+  getInstagramCommentReplyTarget,
+  getInstagramComments,
   getInstagramMedia,
   getInstagramProfile,
+  isInstagramCommentReplyableOnMedia,
   getMetaConfig,
   MetaApiError,
+  replyToInstagramComment,
   refreshInstagramLongLivedToken,
+  verifyInstagramMediaOwnership,
 } from "../src/lib/instagram/meta.ts";
 import {
   logInstagramPersistenceError,
@@ -777,6 +783,382 @@ test("Instagram media rejects malformed pagination cursors", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Instagram comments are read from owned media with safe fields and bounded results", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input.toString());
+    requests.push(url);
+    if (url.searchParams.has("after")) {
+      return Response.json({
+        data: [
+          {
+            id: "17900000000000002",
+            text: "Second page",
+            timestamp: "2026-11-10T12:01:00+0000",
+            hidden: false,
+          },
+        ],
+        paging: {},
+      });
+    }
+    if (url.pathname === "/v27.0/18000000000000001") {
+      return Response.json({
+        id: "18000000000000001",
+        owner: { id: "17841400000000002" },
+      });
+    }
+    return Response.json({
+      data: [
+        {
+          id: "17900000000000001",
+          text: "Test comment",
+          timestamp: "2026-11-10T12:00:00+0000",
+          username: "test_user",
+          hidden: false,
+        },
+      ],
+      paging: {
+        cursors: { after: "comments-next-cursor" },
+        next: "https://graph.facebook.com/v27.0/18000000000000001/comments?after=comments-next-cursor",
+      },
+    });
+  };
+
+  try {
+    const config = {
+      appId: "1234567890",
+      appSecret: "test-app-secret",
+      configId: "9876543210",
+      apiVersion: "v27.0",
+      redirectUri: "https://engage.example/api/instagram/callback",
+    };
+    await verifyInstagramMediaOwnership(
+      config,
+      "server-only-system-user-token",
+      "17841400000000002",
+      "18000000000000001"
+    );
+    const firstPage = await getInstagramComments(
+      config,
+      "server-only-system-user-token",
+      "18000000000000001"
+    );
+    assert.deepEqual(firstPage, {
+      comments: [
+        {
+          id: "17900000000000001",
+          text: "Test comment",
+          timestamp: "2026-11-10T12:00:00+0000",
+          username: "test_user",
+          hidden: false,
+        },
+      ],
+      nextCursor: "comments-next-cursor",
+    });
+    const secondPage = await getInstagramComments(
+      config,
+      "server-only-system-user-token",
+      "18000000000000001",
+      firstPage.nextCursor ?? undefined
+    );
+    assert.deepEqual(secondPage.comments, [
+      {
+        id: "17900000000000002",
+        text: "Second page",
+        timestamp: "2026-11-10T12:01:00+0000",
+        username: null,
+        hidden: false,
+      },
+    ]);
+    assert.equal(requests[0].searchParams.get("fields"), "id,owner");
+    assert.equal(
+      requests[1].pathname,
+      "/v27.0/18000000000000001/comments"
+    );
+    assert.equal(requests[1].searchParams.get("limit"), "50");
+    assert.equal(
+      requests[1].searchParams.get("fields"),
+      "id,text,timestamp,username,hidden"
+    );
+    assert.equal(requests[2].searchParams.get("after"), "comments-next-cursor");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram comment reply target validates media, visibility, and top-level status", async () => {
+  const originalFetch = globalThis.fetch;
+  const payloads: unknown[] = [
+    {
+      id: "17900000000000001",
+      hidden: false,
+      media: { id: "18000000000000001" },
+    },
+    {
+      id: "17900000000000002",
+      hidden: true,
+      media: { id: "18000000000000001" },
+    },
+    {
+      id: "17900000000000003",
+      hidden: false,
+      media: { id: "18000000000000002" },
+      parent_id: "17900000000000001",
+    },
+  ];
+  globalThis.fetch = async () => Response.json(payloads.shift());
+
+  try {
+    const config = {
+      appId: "1234567890",
+      appSecret: "test-app-secret",
+      configId: "9876543210",
+      apiVersion: "v27.0",
+      redirectUri: "https://engage.example/api/instagram/callback",
+    };
+    assert.deepEqual(
+      await getInstagramCommentReplyTarget(
+        config,
+        "server-only-system-user-token",
+        "17900000000000001"
+      ),
+      {
+        id: "17900000000000001",
+        mediaId: "18000000000000001",
+        hidden: false,
+        parentId: null,
+      }
+    );
+    assert.equal(
+      (await getInstagramCommentReplyTarget(
+        config,
+        "server-only-system-user-token",
+        "17900000000000002"
+      )).hidden,
+      true
+    );
+    const reply = await getInstagramCommentReplyTarget(
+      config,
+      "server-only-system-user-token",
+      "17900000000000003"
+    );
+    assert.equal(reply.parentId, "17900000000000001");
+    assert.equal(reply.mediaId, "18000000000000002");
+    assert.equal(isInstagramCommentReplyableOnMedia(reply, "18000000000000002"), false);
+    assert.equal(
+      isInstagramCommentReplyableOnMedia(
+        {
+          id: "17900000000000004",
+          mediaId: "18000000000000001",
+          hidden: true,
+          parentId: null,
+        },
+        "18000000000000001"
+      ),
+      false
+    );
+    assert.equal(
+      isInstagramCommentReplyableOnMedia(
+        {
+          id: "17900000000000005",
+          mediaId: "18000000000000001",
+          hidden: false,
+          parentId: null,
+        },
+        "18000000000000001"
+      ),
+      true
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram comment replies send credentials in the POST body and sanitize API errors", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: URL; init: RequestInit }> = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(input.toString());
+    requests.push({ url, init });
+    return Response.json({ id: "17900000000000002" });
+  };
+
+  try {
+    const reply = await replyToInstagramComment(
+      {
+        appId: "1234567890",
+        appSecret: "test-app-secret",
+        configId: "9876543210",
+        apiVersion: "v27.0",
+        redirectUri: "https://engage.example/api/instagram/callback",
+      },
+      "server-only-system-user-token",
+      "17900000000000001",
+      " Thanks for your comment! "
+    );
+    assert.deepEqual(reply, { id: "17900000000000002" });
+    assert.equal(requests[0].url.pathname, "/v27.0/17900000000000001/replies");
+    assert.equal(requests[0].url.search, "");
+    assert.equal(requests[0].init.method, "POST");
+    const form = new URLSearchParams(String(requests[0].init.body));
+    assert.equal(form.get("message"), "Thanks for your comment!");
+    assert.equal(form.get("access_token"), "server-only-system-user-token");
+    assert.ok(form.get("appsecret_proof"));
+
+    globalThis.fetch = async () =>
+      Response.json(
+        {
+          error: {
+            message: "private token and raw response must not escape",
+            code: 10,
+          },
+        },
+        { status: 400 }
+      );
+    await assert.rejects(
+      replyToInstagramComment(
+        {
+          appId: "1234567890",
+          appSecret: "test-app-secret",
+          configId: "9876543210",
+          apiVersion: "v27.0",
+          redirectUri: "https://engage.example/api/instagram/callback",
+        },
+        "server-only-system-user-token",
+        "17900000000000001",
+        "Test reply"
+      ),
+      (error: unknown) =>
+        error instanceof MetaApiError &&
+        error.code === "meta_request_failed" &&
+        !error.message.includes("private token")
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram reply message length uses the 2,200-character limit", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return Response.json({ id: "17900000000000002" });
+  };
+  const config = {
+    appId: "1234567890",
+    appSecret: "test-app-secret",
+    configId: "9876543210",
+    apiVersion: "v27.0",
+    redirectUri: "https://engage.example/api/instagram/callback",
+  };
+
+  try {
+    await replyToInstagramComment(
+      config,
+      "server-only-system-user-token",
+      "17900000000000001",
+      "😀".repeat(2200)
+    );
+    await assert.rejects(
+      replyToInstagramComment(
+        config,
+        "server-only-system-user-token",
+        "17900000000000001",
+        "😀".repeat(2201)
+      ),
+      { code: "meta_comment_reply_invalid" }
+    );
+    assert.equal(fetchCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram comment reply attempts block immediate duplicates without claiming durable exactly-once delivery", () => {
+  const now = 1_800_000_000_000;
+  const accountId = "test-account-reply-guard";
+  const commentId = "test-comment-reply-guard";
+  assert.equal(
+    claimInstagramCommentReplyAttempt(accountId, commentId, now),
+    true
+  );
+  assert.equal(
+    claimInstagramCommentReplyAttempt(accountId, commentId, now + 1),
+    false
+  );
+  assert.equal(
+    claimInstagramCommentReplyAttempt(
+      accountId,
+      commentId,
+      now + 15 * 60 * 1000
+    ),
+    true
+  );
+});
+
+test("uncertain Instagram reply POST failures are reported without retries", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("transport failure");
+  };
+  try {
+    await assert.rejects(
+      replyToInstagramComment(
+        {
+          appId: "1234567890",
+          appSecret: "test-app-secret",
+          configId: "9876543210",
+          apiVersion: "v27.0",
+          redirectUri: "https://engage.example/api/instagram/callback",
+        },
+        "server-only-system-user-token",
+        "17900000000000001",
+        "One attempt only"
+      ),
+      { code: "meta_post_outcome_unknown" }
+    );
+    assert.equal(fetchCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Instagram public reply routes require same-origin confirmation and owned account context", () => {
+  const commentsRoute = readFileSync(
+    new URL("../src/app/api/instagram/comments/route.ts", import.meta.url),
+    "utf8"
+  );
+  const replyRoute = readFileSync(
+    new URL("../src/app/api/instagram/comment-reply/route.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(commentsRoute, /getOwnedInstagramDataContext/);
+  assert.match(commentsRoute, /verifyInstagramMediaOwnership/);
+  assert.match(commentsRoute, /"Cache-Control": "no-store"/);
+  assert.match(commentsRoute, /url\.searchParams\.get\("after"\)/);
+  assert.match(commentsRoute, /nextCursor/);
+  assert.doesNotMatch(commentsRoute, /accessToken\s*:/);
+  assert.match(replyRoute, /isSameOriginRequest\(request\)/);
+  assert.match(replyRoute, /request\.headers\.get\("origin"\)/);
+  assert.match(replyRoute, /body\.confirm !== true/);
+  assert.match(replyRoute, /getOwnedInstagramDataContext\(body\.accountId\)/);
+  assert.match(replyRoute, /getInstagramCommentReplyTarget/);
+  assert.match(replyRoute, /comment\.mediaId !== body\.mediaId/);
+  assert.match(replyRoute, /isInstagramCommentReplyableOnMedia/);
+  assert.match(replyRoute, /claimInstagramCommentReplyAttempt/);
+  assert.match(replyRoute, /retryable: false/);
+  assert.match(replyRoute, /outcome: "unknown"/);
+  assert.match(replyRoute, /replyToInstagramComment/);
+  assert.match(replyRoute, /"Cache-Control": "no-store"/);
+  assert.doesNotMatch(replyRoute, /console\.(log|info|warn|error)/);
+  assert.doesNotMatch(replyRoute, /accessToken\s*:/);
 });
 
 test("Instagram media pagination deduplicates by media ID", () => {
