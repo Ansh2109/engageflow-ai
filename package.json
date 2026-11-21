@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test:automation": "node --experimental-strip-types --test tests/automation-navigation.test.ts tests/automation-drafts.test.ts tests/media-pagination-request.test.ts tests/automation-lifecycle.test.ts tests/automation-media-validation.test.ts",
     "test:auth": "node --experimental-strip-types --test tests/auth-flow.test.ts",
-    "test:instagram": "node --conditions=react-server --experimental-strip-types --test tests/instagram-flow.test.ts tests/instagram-webhook.test.ts"
+    "test:instagram": "node --conditions=react-server --experimental-strip-types --test tests/instagram-flow.test.ts tests/instagram-webhook.test.ts tests/instagram-event-processor.test.ts tests/instagram-event-processor-route.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
@@ -35,6 +35,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.5",
     "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
     "typescript": "^5"
   }
 }

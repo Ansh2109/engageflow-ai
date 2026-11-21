@@ -39,3 +39,9 @@ Thumbs.db
 # --- Supabase local dev ---
 supabase/.branches/
 supabase/.temp/
+
+# --- Temporary debug and verification artifacts ---
+.tmp-db*
+tmp-load.*
+tmp-route-resolve.*
+.pgpass

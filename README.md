@@ -42,6 +42,7 @@ META_CONFIG_ID=<Facebook Login for Business configuration ID>
 META_API_VERSION=v27.0
 META_REDIRECT_URI=<NEXT_PUBLIC_SITE_URL>/api/instagram/callback
 INSTAGRAM_WEBHOOK_VERIFY_TOKEN=<random server-only verification token>
+INSTAGRAM_EVENT_PROCESSOR_SECRET=<random server-only bearer secret, at least 32 characters>
 TOKEN_ENCRYPTION_KEY=<64-character hexadecimal AES-256 key>
 ```
 
@@ -123,6 +124,8 @@ intended database:
 4. `supabase/migrations/20261110000004_instagram_login_connections.sql`
 5. `supabase/migrations/20261110000005_instagram_unified_login.sql`
 6. `supabase/migrations/20261111000001_unified_login_permissions.sql`
+7. `supabase/migrations/20261111000005_instagram_webhook_processing.sql`
+8. `supabase/migrations/20261111000006_webhook_processing_leases.sql`
 
 The fifth migration adds a separate table, account relationship, and
 service-role-only RPC for the Unified Login System User token flow. The sixth
@@ -134,6 +137,14 @@ original table; when an account is reconnected through Unified Login, only its
 account link changes. The migration does not delete customer accounts or
 connection rows. Apply this migration manually; the app does not apply it
 automatically.
+
+The seventh and eighth migrations add the webhook processing pipeline. The
+seventh adds lease columns, a claimable partial index, and the service-role-only
+`claim_instagram_webhook_events` and `finish_instagram_webhook_event`
+functions. The eighth adds `next_attempt_at` retry backoff, an ACTIVE-automation
+lookup index, and a service-role guard that recognizes both legacy
+`service_role` JWTs and opaque `sb_secret_...` keys; it adds no column, function
+or index that the seventh already created, and drops nothing.
 
 Disconnecting deletes the local account record and may remove its now-unused
 Unified Login token; unrelated legacy and direct Instagram Login connection
@@ -176,14 +187,15 @@ and does not request additional permissions; validate write compatibility on
 an explicitly approved test comment before enabling broader use. Hidden
 comments and comments on Live video are not replyable.
 
-**Repository limitation:** this source tree currently has no Instagram webhook
-route, account webhook-subscription call, or automation event processor. It
-contains automation and webhook-event database tables, but connecting an
-account alone cannot receive events or execute DM/comment automations. These
-must be implemented and deployed before promising those features. Meta
-requires an HTTPS webhook endpoint, account subscriptions, the corresponding
-permissions, and compliance with Instagram's messaging windows (generally 24
-hours; some Click-to-Direct-ad interactions allow up to 7 days).
+**Repository limitation:** this source tree has an HTTPS webhook receiver and a
+match-only event processor, but no account webhook-subscription call and no
+automation message executor. Connecting an account therefore still cannot
+receive events until the app is subscribed, and recording a keyword match does
+not send a DM or public reply. Those capabilities must be implemented and
+deployed before promising comment-to-DM automation. Meta requires an HTTPS
+webhook endpoint, account subscriptions, the corresponding permissions, and
+compliance with Instagram's messaging windows (generally 24 hours; some
+Click-to-Direct-ad interactions allow up to 7 days).
 
 Comment-to-DM drafts can be saved, edited, listed, and deleted after applying
 the additive `20261111000002_comment_to_dm_drafts.sql` migration. Drafts remain
@@ -259,6 +271,56 @@ transaction with `last_verified_at` set by the database clock. Revoke or clear
 readiness immediately when any capability regresses, and re-verify after
 relevant deployments. The application currently provides no readiness write
 API. Never expose a service-role key to browser code.
+
+### Webhook event processing
+
+`20261111000005_instagram_webhook_processing.sql` adds lease columns, a
+claimable partial index, and two service-role-only functions:
+
+- `claim_instagram_webhook_events(batch_size, lease_seconds)` atomically claims
+due events with `FOR UPDATE SKIP LOCKED`, increments `attempts`, and sets a
+lease. Batch size is limited to 1–5 and the lease to 30–180 seconds; the app
+requests 5 and 60.
+- `finish_instagram_webhook_event(...)` finalizes a claimed event only while the
+caller still holds a live claim token, otherwise it raises
+`WEBHOOK_CLAIM_LOST` (`40001`).
+
+`20261111000006_webhook_processing_leases.sql` adds `next_attempt_at`, records
+exponential retry backoff (30s, 60s, 120s, 240s; capped at 15 minutes), allows an
+`IGNORED` outcome to retain the mapped account after that account stops being
+`CONNECTED`, and makes the service-role guard work with both key generations.
+`auth.role()` alone is insufficient for `sb_secret_...` keys because they are
+not JWTs: they resolve to the `service_role` Postgres role but carry no JWT
+claims. The guard therefore also accepts an effective `SET ROLE service_role`
+session. Execution remains granted to `service_role` only, with `PUBLIC`, `anon`
+and `authenticated` revoked, and a session cannot forge either signal.
+
+Processing is triggered by `POST /api/internal/instagram-events` with
+`Authorization: Bearer <INSTAGRAM_EVENT_PROCESSOR_SECRET>`. The route returns
+503 when the secret is unset or shorter than 32 characters, 401 on mismatch,
+405 for `GET`, and processes at most five claimed events per request,
+sequentially.
+
+Matching is strictly read-only. For each claimed `change:comments` event the
+processor maps `entry.id` to `instagram_accounts.instagram_business_id`, loads
+`ACTIVE` `COMMENT_TO_DM` automations for that account and target media, and
+compares normalized comment text (NFKC, trimmed, case-folded) against
+`automation_triggers.keyword` using `EXACT` or `CONTAINS`. Matched automation
+IDs are sorted, de-duplicated, and stored on the event row only
+(`matched_automation_ids`). The processor makes no Meta API call, needs no
+Instagram token, and never sends a DM or public reply, inserts an
+`activity_logs` row, changes an automation's status, or writes readiness.
+
+Outcomes are `MATCHED`, `NO_MATCH`, `IGNORED`, `RETRYABLE_FAILURE` or
+`TERMINAL_FAILURE`. `IGNORED` covers unsupported event types, malformed
+payloads, unknown accounts (including Meta test deliveries), disconnected
+accounts, self-authored comments and comments without text. Failed events are
+retried at most five times: leases that expire return an event to the claimable
+pool with `attempts` already incremented, and the claim function finalizes
+exhausted events as `FAILED` / `MAX_ATTEMPTS_EXCEEDED`.
+
+This does not unblock activation. Runtime readiness is still unavailable and no
+message executor exists, so Activate and Resume remain blocked.
 
 Run lifecycle and draft regressions with:
 

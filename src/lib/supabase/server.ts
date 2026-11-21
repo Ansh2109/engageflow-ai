@@ -1,7 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { cookies } from "next/headers";
-
 /**
  * Standard server-side Supabase client for Server Components, Server Actions,
  * and Route Handlers.
@@ -10,6 +8,10 @@ import { cookies } from "next/headers";
  * Row Level Security (RLS) policies.
  */
 export async function createClient() {
+  // Dynamic import: next/headers is not resolvable outside the Next.js
+  // bundler (no exports map in the next package). Deferring resolution keeps
+  // this module loadable in the Node.js test runner.
+  const { cookies } = await import("next/headers");
   const cookieStore = await cookies();
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;

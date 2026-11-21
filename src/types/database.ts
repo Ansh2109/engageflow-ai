@@ -28,6 +28,12 @@ export type ProcessingStatus =
   | "FAILED"
   | "DUPLICATE"
   | "IGNORED";
+export type ProcessingOutcome =
+  | "MATCHED"
+  | "NO_MATCH"
+  | "IGNORED"
+  | "RETRYABLE_FAILURE"
+  | "TERMINAL_FAILURE";
 export type ActivityLogStatus =
   | "RECEIVED"
   | "PROCESSING"
@@ -453,6 +459,14 @@ export interface Database {
           event_type: string;
           event_payload: Json;
           processing_status: ProcessingStatus;
+          processing_outcome: ProcessingOutcome | null;
+          matched_automation_ids: string[] | null;
+          claim_token: string | null;
+          claim_expires_at: string | null;
+          next_attempt_at: string | null;
+
+          // Partial typed table for testing assertions below.
+          [k: string]: unknown;
           attempts: number;
           error_message: string | null;
           received_at: string;
@@ -465,6 +479,11 @@ export interface Database {
           event_type: string;
           event_payload: Json;
           processing_status?: ProcessingStatus;
+          processing_outcome?: ProcessingOutcome | null;
+          matched_automation_ids?: string[] | null;
+          claim_token?: string | null;
+          claim_expires_at?: string | null;
+          next_attempt_at?: string | null;
           attempts?: number;
           error_message?: string | null;
           received_at?: string;
@@ -477,6 +496,11 @@ export interface Database {
           event_type?: string;
           event_payload?: Json;
           processing_status?: ProcessingStatus;
+          processing_outcome?: ProcessingOutcome | null;
+          matched_automation_ids?: string[] | null;
+          claim_token?: string | null;
+          claim_expires_at?: string | null;
+          next_attempt_at?: string | null;
           attempts?: number;
           error_message?: string | null;
           received_at?: string;
@@ -818,6 +842,34 @@ export interface Database {
         Returns: {
           status: AutomationStatus;
           updated_at: string;
+        }[];
+      };
+      claim_instagram_webhook_events: {
+        Args: {
+          p_batch_size: number;
+          p_lease_seconds: number;
+        };
+        Returns: {
+          event_id: string;
+          external_event_id: string;
+          event_type: string;
+          event_payload: Json;
+          attempts: number;
+          claim_token: string;
+        }[];
+      };
+      finish_instagram_webhook_event: {
+        Args: {
+          p_event_id: string;
+          p_claim_token: string;
+          p_outcome: ProcessingOutcome;
+          p_instagram_account_id: string | null;
+          p_matched_automation_ids: string[];
+          p_error_code: string | null;
+        };
+        Returns: {
+          processing_status: ProcessingStatus;
+          processing_outcome: ProcessingOutcome | null;
         }[];
       };
     };
